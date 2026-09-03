@@ -1,0 +1,22 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "{4D8C6839-4257-58CA-B83B-AE8F6BBA8A3D}",
+	"Category": "",
+	"Description": "",
+	"Modules": [
+		{
+			"Name": "AJReflectionsLab",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "ModelingToolsEditorMode",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		}
+	]
+}

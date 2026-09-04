@@ -1,0 +1,8 @@
+// AJReflections 
+
+#include "/Engine/Public/Platform.ush"
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+}

@@ -1,8 +1,22 @@
-// AJReflections 
+// AJReflections debug compute shader
 
 #include "/Engine/Public/Platform.ush"
+
+int2 OutputSize;
+RWTexture2D<float4> OutputTexture;
 
 [numthreads(8, 8, 1)]
 void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
+    if (DispatchThreadId.x >= (uint) OutputSize.x ||
+        DispatchThreadId.y >= (uint) OutputSize.y)
+    {
+        return;
+    }
+
+    const float2 UV =
+        (float2(DispatchThreadId.xy) + 0.5f) / float2(OutputSize);
+
+    OutputTexture[DispatchThreadId.xy] =
+        float4(UV, 0.75f, 1.0f);
 }

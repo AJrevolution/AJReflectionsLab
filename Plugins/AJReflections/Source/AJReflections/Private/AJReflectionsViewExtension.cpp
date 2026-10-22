@@ -76,13 +76,27 @@ FAJReflectionsViewExtension::PostProcessAfterDOF_RenderThread(
             GraphBuilder);
     }
 
-    const FIntPoint ViewSize = SceneColor.ViewRect.Size();
+    // This project targets the deferred renderer. The shader below consumes
+    // FSceneTextureUniformParameters via SceneTexturesStruct.
+    if (!Inputs.SceneTextures.SceneTextures)
+    {
+        return Inputs.ReturnUntouchedSceneColorForPostProcessing(
+            GraphBuilder);
+    }
+
+    const FIntPoint ViewSize =
+        SceneColor.ViewRect.Size();
+
+    const FIntPoint ViewRectMin =
+        SceneColor.ViewRect.Min;
 
     const FScreenPassTexture DebugOutput =
         AddAJDebugPass(
             GraphBuilder,
             View,
-            ViewSize);
+            ViewSize,
+            ViewRectMin,
+            Inputs.SceneTextures);
 
     if (!DebugOutput.IsValid())
     {

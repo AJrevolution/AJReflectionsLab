@@ -1,8 +1,12 @@
 // AJReflections debug compute shader
 
+#include "/Engine/Private/Common.ush"
 #include "/Engine/Public/Platform.ush"
 
 int2 OutputSize;
+int2 ViewRectMin;
+int DebugMode;
+
 RWTexture2D<float4> OutputTexture;
 
 [numthreads(8, 8, 1)]
@@ -14,8 +18,32 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
+    if (DebugMode == 1)
+    {
+        // AJReflections output is compact/view-local, while Scene Depth is
+        // addressed in the renderer scene-texture coordinate space.
+        const int2 ScenePixel =
+            int2(DispatchThreadId.xy) + ViewRectMin;
+
+        const float DeviceDepth =
+            SceneTexturesStruct.SceneDepthTexture.Load(
+                int3(ScenePixel, 0)).r;
+
+        OutputTexture[DispatchThreadId.xy] =
+            float4(
+                DeviceDepth,
+                DeviceDepth,
+                DeviceDepth,
+                1.0f);
+
+        return;
+    }
+
+    // DebugMode 0, and the safe fallback for unsupported values:
+    // preserve the known-good Week 1 UV gradient.
     const float2 UV =
-        (float2(DispatchThreadId.xy) + 0.5f) / float2(OutputSize);
+        (float2(DispatchThreadId.xy) + 0.5f) /
+        float2(OutputSize);
 
     OutputTexture[DispatchThreadId.xy] =
         float4(UV, 0.75f, 1.0f);

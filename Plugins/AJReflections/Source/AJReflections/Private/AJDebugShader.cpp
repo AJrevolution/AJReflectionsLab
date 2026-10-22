@@ -3,10 +3,23 @@
 #include "AJDebugShader.h"
 
 #include "GlobalShader.h"
+#include "HAL/IConsoleManager.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
+#include "SceneTexturesConfig.h"
 #include "SceneView.h"
 #include "ShaderParameterStruct.h"
+
+namespace
+{
+    TAutoConsoleVariable<int32> CVarAJReflectionsDebugMode(
+        TEXT("r.AJReflections.DebugMode"),
+        1,
+        TEXT("Selects the AJReflections debug visualization.\n")
+        TEXT("0: UV gradient\n")
+        TEXT("1: Raw device depth\n"),
+        ECVF_RenderThreadSafe);
+}
 
 class FAJDebugCS : public FGlobalShader
 {
@@ -16,6 +29,13 @@ public:
 
     BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
         SHADER_PARAMETER(FIntPoint, OutputSize)
+        SHADER_PARAMETER(FIntPoint, ViewRectMin)
+        SHADER_PARAMETER(int32, DebugMode)
+
+        SHADER_PARAMETER_STRUCT_INCLUDE(
+            FSceneTextureShaderParameters,
+            SceneTextures)
+
         SHADER_PARAMETER_RDG_TEXTURE_UAV(
             RWTexture2D<float4>,
             OutputTexture)
@@ -31,15 +51,17 @@ IMPLEMENT_GLOBAL_SHADER(
 FScreenPassTexture AddAJDebugPass(
     FRDGBuilder& GraphBuilder,
     const FSceneView& View,
-    FIntPoint ViewSize)
+    FIntPoint ViewSize,
+    FIntPoint ViewRectMin,
+    const FSceneTextureShaderParameters& SceneTextures)
 {
     if (ViewSize.X <= 0 || ViewSize.Y <= 0)
     {
         return {};
     }
 
-    // Compact per-view output: shader coordinates are local 0..ViewSize-1.
-    // Future renderer work must not assume View.ViewRect.Min is zero.
+    // The debug output remains compact and view-local. Renderer scene textures
+    // use their original scene-texture coordinates, supplied through ViewRectMin.
     const FRDGTextureDesc OutputDesc =
         FRDGTextureDesc::Create2D(
             ViewSize,
@@ -56,6 +78,12 @@ FScreenPassTexture AddAJDebugPass(
         GraphBuilder.AllocParameters<FAJDebugCS::FParameters>();
 
     PassParameters->OutputSize = ViewSize;
+    PassParameters->ViewRectMin = ViewRectMin;
+
+    PassParameters->DebugMode =
+        CVarAJReflectionsDebugMode.GetValueOnRenderThread();
+
+    PassParameters->SceneTextures = SceneTextures;
 
     PassParameters->OutputTexture =
         GraphBuilder.CreateUAV(

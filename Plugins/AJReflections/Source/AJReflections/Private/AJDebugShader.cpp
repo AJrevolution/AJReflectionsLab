@@ -17,7 +17,15 @@ namespace
         1,
         TEXT("Selects the AJReflections debug visualization.\n")
         TEXT("0: UV gradient\n")
-        TEXT("1: Raw device depth\n"),
+        TEXT("1: Raw device depth\n")
+        TEXT("2: Linear ViewZ\n"),
+        ECVF_RenderThreadSafe);
+
+    TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(
+        TEXT("r.AJReflections.DebugViewZMax"),
+        10000.0f,
+        TEXT("Maximum linear ViewZ mapped to white in DebugMode 2, ")
+        TEXT("in Unreal world units.\n"),
         ECVF_RenderThreadSafe);
 }
 
@@ -31,6 +39,11 @@ public:
         SHADER_PARAMETER(FIntPoint, OutputSize)
         SHADER_PARAMETER(FIntPoint, ViewRectMin)
         SHADER_PARAMETER(int32, DebugMode)
+        SHADER_PARAMETER(float, DebugViewZMax)
+
+        SHADER_PARAMETER_STRUCT_REF(
+            FViewUniformShaderParameters,
+            View)
 
         SHADER_PARAMETER_STRUCT_INCLUDE(
             FSceneTextureShaderParameters,
@@ -82,6 +95,14 @@ FScreenPassTexture AddAJDebugPass(
 
     PassParameters->DebugMode =
         CVarAJReflectionsDebugMode.GetValueOnRenderThread();
+
+    PassParameters->DebugViewZMax =
+        FMath::Max(
+            CVarAJReflectionsDebugViewZMax.GetValueOnRenderThread(),
+            1.0f);
+
+    PassParameters->View =
+        View.ViewUniformBuffer;
 
     PassParameters->SceneTextures = SceneTextures;
 

@@ -6,6 +6,7 @@
 int2 OutputSize;
 int2 ViewRectMin;
 int DebugMode;
+float DebugViewZMax;
 
 RWTexture2D<float4> OutputTexture;
 
@@ -18,7 +19,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    if (DebugMode == 1)
+    if (DebugMode == 1 || DebugMode == 2)
     {
         // AJReflections output is compact/view-local, while Scene Depth is
         // addressed in the renderer scene-texture coordinate space.
@@ -29,6 +30,26 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             SceneTexturesStruct.SceneDepthTexture.Load(
                 int3(ScenePixel, 0)).r;
 
+        if (DebugMode == 2)
+        {
+            // ViewZ is the actual reconstructed linear depth. Normalization is
+            // strictly a visualization step and must not redefine the depth value.
+            const float ViewZ = ConvertFromDeviceZ(DeviceDepth);
+
+            const float NormalizedViewZ =
+                saturate(ViewZ / DebugViewZMax);
+
+            OutputTexture[DispatchThreadId.xy] =
+                float4(
+                    NormalizedViewZ,
+                    NormalizedViewZ,
+                    NormalizedViewZ,
+                    1.0f);
+
+            return;
+        }
+
+        // DebugMode 1: preserve the existing raw device-depth visualization.
         OutputTexture[DispatchThreadId.xy] =
             float4(
                 DeviceDepth,

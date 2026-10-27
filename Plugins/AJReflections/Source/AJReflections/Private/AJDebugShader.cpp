@@ -18,7 +18,9 @@ namespace
         TEXT("Selects the AJReflections debug visualization.\n")
         TEXT("0: UV gradient\n")
         TEXT("1: Raw device depth\n")
-        TEXT("2: Linear ViewZ\n"),
+        TEXT("2: Linear ViewZ\n")
+        TEXT("3: World normal\n")
+        TEXT("4: Roughness\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(

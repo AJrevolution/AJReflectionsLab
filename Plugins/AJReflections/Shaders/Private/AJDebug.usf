@@ -2,6 +2,7 @@
 
 #include "/Engine/Private/Common.ush"
 #include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
 
 int2 OutputSize;
 int2 ViewRectMin;
@@ -55,6 +56,60 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
                 DeviceDepth,
                 DeviceDepth,
                 DeviceDepth,
+                1.0f);
+
+        return;
+    }
+
+    if (DebugMode == 3 || DebugMode == 4)
+    {
+        // AJReflections output is compact/view-local, while the GBuffer is
+        // addressed in renderer scene-texture coordinates.
+        const uint2 ScenePixel =
+            uint2(int2(DispatchThreadId.xy) + ViewRectMin);
+
+        // Decode semantic renderer data rather than depending on fixed
+        // GBuffer texture/channel packing. Passing true requests a
+        // normalized world-space normal from Unreal's decoder.
+        const FGBufferData GBuffer =
+            GetGBufferDataUint(ScenePixel, true);
+
+        // Sky/background and unlit surfaces do not provide the opaque,
+        // deferred surface data that the future reflection tracer needs.
+        // Keep this as a small debug safeguard rather than a full validity
+        // system.
+        if (GBuffer.ShadingModelID == SHADINGMODELID_UNLIT)
+        {
+            OutputTexture[DispatchThreadId.xy] =
+                float4(0.0f, 0.0f, 0.0f, 1.0f);
+
+            return;
+        }
+
+        if (DebugMode == 3)
+        {
+            const float3 WorldNormal =
+                GBuffer.WorldNormal;
+
+            // Display-only mapping from [-1, 1] into [0, 1].
+            const float3 NormalDisplay =
+                WorldNormal * 0.5f + 0.5f;
+
+            OutputTexture[DispatchThreadId.xy] =
+                float4(NormalDisplay, 1.0f);
+
+            return;
+        }
+
+        // DebugMode 4: semantic renderer roughness, already in [0, 1].
+        const float Roughness =
+            GBuffer.Roughness;
+
+        OutputTexture[DispatchThreadId.xy] =
+            float4(
+                Roughness,
+                Roughness,
+                Roughness,
                 1.0f);
 
         return;

@@ -8,6 +8,7 @@ int2 OutputSize;
 int2 ViewRectMin;
 int DebugMode;
 float DebugViewZMax;
+float DebugVelocityScale;
 
 RWTexture2D<float4> OutputTexture;
 
@@ -111,6 +112,64 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
                 Roughness,
                 Roughness,
                 1.0f);
+
+        return;
+    }
+
+    if (DebugMode == 5)
+    {
+        // AJReflections output is compact/view-local. The velocity resource,
+        // like the other renderer scene textures, uses scene-texture
+        // coordinates.
+        const uint2 ScenePixel =
+            uint2(int2(DispatchThreadId.xy) + ViewRectMin);
+
+        const ENCODED_VELOCITY_TYPE EncodedVelocity =
+            SceneTexturesStruct.GBufferVelocityTexture.Load(
+                int3(ScenePixel, 0));
+
+        // Unreal reserves the cleared texture value (0,0,...) to mean that
+        // this pixel has no rendered velocity. Do not feed that sentinel into
+        // DecodeVelocityFromTexture().
+        //
+        // This packet intentionally inspects only velocity actually written
+        // into the scene velocity buffer. UE temporal consumers reconstruct
+        // static/camera motion from depth + ClipToPrevClip when this marker is
+        // absent; that fallback belongs to the future temporal stage.
+        const bool bHasRenderedVelocity =
+            EncodedVelocity.x > 0.0f;
+
+        const float2 Velocity =
+            bHasRenderedVelocity
+                ? DecodeVelocityFromTexture(EncodedVelocity).xy
+                : float2(0.0f, 0.0f);
+
+        // Display-only amplification. Velocity itself remains in Unreal's
+        // native screen-position units and must never be replaced by this
+        // scaled value in future reprojection code.
+        const float2 DisplayVelocity =
+            clamp(
+                Velocity * DebugVelocityScale,
+                -1.0f,
+                1.0f);
+
+        const float Magnitude =
+            saturate(
+                length(Velocity) * DebugVelocityScale);
+
+        // Signed debug representation:
+        //   zero X/Y -> R/G = 0.5
+        //   +/- X    -> R above/below 0.5
+        //   +/- Y    -> G above/below 0.5
+        //   magnitude -> B
+        const float3 VelocityDisplay =
+            float3(
+                DisplayVelocity.x * 0.5f + 0.5f,
+                DisplayVelocity.y * 0.5f + 0.5f,
+                Magnitude);
+
+        OutputTexture[DispatchThreadId.xy] =
+            float4(VelocityDisplay, 1.0f);
 
         return;
     }

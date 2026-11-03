@@ -20,7 +20,8 @@ namespace
         TEXT("1: Raw device depth\n")
         TEXT("2: Linear ViewZ\n")
         TEXT("3: World normal\n")
-        TEXT("4: Roughness\n"),
+        TEXT("4: Roughness\n")
+        TEXT("5: Scene velocity\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(
@@ -28,6 +29,15 @@ namespace
         10000.0f,
         TEXT("Maximum linear ViewZ mapped to white in DebugMode 2, ")
         TEXT("in Unreal world units.\n"),
+        ECVF_RenderThreadSafe);
+
+    TAutoConsoleVariable<float> CVarAJReflectionsDebugVelocityScale(
+        TEXT("r.AJReflections.DebugVelocityScale"),
+        20.0f,
+        TEXT("Display amplification for decoded scene velocity in ")
+        TEXT("DebugMode 5.\n")
+        TEXT("This affects visualization only and does not modify ")
+        TEXT("the renderer velocity semantic.\n"),
         ECVF_RenderThreadSafe);
 }
 
@@ -42,6 +52,7 @@ public:
         SHADER_PARAMETER(FIntPoint, ViewRectMin)
         SHADER_PARAMETER(int32, DebugMode)
         SHADER_PARAMETER(float, DebugViewZMax)
+        SHADER_PARAMETER(float, DebugVelocityScale)
 
         SHADER_PARAMETER_STRUCT_REF(
             FViewUniformShaderParameters,
@@ -102,6 +113,11 @@ FScreenPassTexture AddAJDebugPass(
         FMath::Max(
             CVarAJReflectionsDebugViewZMax.GetValueOnRenderThread(),
             1.0f);
+
+    PassParameters->DebugVelocityScale =
+        FMath::Max(
+            CVarAJReflectionsDebugVelocityScale.GetValueOnRenderThread(),
+            0.0f);
 
     PassParameters->View =
         View.ViewUniformBuffer;

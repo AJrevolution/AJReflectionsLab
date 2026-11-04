@@ -21,7 +21,9 @@ namespace
         TEXT("2: Linear ViewZ\n")
         TEXT("3: World normal\n")
         TEXT("4: Roughness\n")
-        TEXT("5: Scene velocity\n"),
+        TEXT("5: Scene velocity\n")
+        TEXT("6: Scene color\n")
+        TEXT("7: Scene color without pre-exposure\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(
@@ -62,6 +64,10 @@ public:
             FSceneTextureShaderParameters,
             SceneTextures)
 
+        SHADER_PARAMETER_RDG_TEXTURE_SRV(
+            Texture2D,
+            SceneColorTexture)
+
         SHADER_PARAMETER_RDG_TEXTURE_UAV(
             RWTexture2D<float4>,
             OutputTexture)
@@ -77,17 +83,28 @@ IMPLEMENT_GLOBAL_SHADER(
 FScreenPassTexture AddAJDebugPass(
     FRDGBuilder& GraphBuilder,
     const FSceneView& View,
-    FIntPoint ViewSize,
-    FIntPoint ViewRectMin,
+    const FScreenPassTextureSlice& SceneColor,
     const FSceneTextureShaderParameters& SceneTextures)
 {
+    if (!SceneColor.IsValid())
+    {
+        return {};
+    }
+
+    const FIntPoint ViewSize =
+        SceneColor.ViewRect.Size();
+
+    const FIntPoint ViewRectMin =
+        SceneColor.ViewRect.Min;
+
     if (ViewSize.X <= 0 || ViewSize.Y <= 0)
     {
         return {};
     }
 
     // The debug output remains compact and view-local. Renderer scene textures
-    // use their original scene-texture coordinates, supplied through ViewRectMin.
+    // and callback SceneColor use their original texture coordinates, supplied
+    // through the callback SceneColor ViewRect.
     const FRDGTextureDesc OutputDesc =
         FRDGTextureDesc::Create2D(
             ViewSize,
@@ -123,6 +140,9 @@ FScreenPassTexture AddAJDebugPass(
         View.ViewUniformBuffer;
 
     PassParameters->SceneTextures = SceneTextures;
+
+    PassParameters->SceneColorTexture =
+        SceneColor.TextureSRV;
 
     PassParameters->OutputTexture =
         GraphBuilder.CreateUAV(

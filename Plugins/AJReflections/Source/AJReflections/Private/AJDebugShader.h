@@ -9,6 +9,5 @@ class FSceneTextureShaderParameters;
 FScreenPassTexture AddAJDebugPass(
     FRDGBuilder& GraphBuilder,
     const FSceneView& View,
-    FIntPoint ViewSize,
-    FIntPoint ViewRectMin,
+    const FScreenPassTextureSlice& SceneColor,
     const FSceneTextureShaderParameters& SceneTextures);

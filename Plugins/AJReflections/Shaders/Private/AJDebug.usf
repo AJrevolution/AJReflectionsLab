@@ -10,6 +10,7 @@ int DebugMode;
 float DebugViewZMax;
 float DebugVelocityScale;
 
+Texture2D SceneColorTexture;
 RWTexture2D<float4> OutputTexture;
 
 [numthreads(8, 8, 1)]
@@ -170,6 +171,33 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
         OutputTexture[DispatchThreadId.xy] =
             float4(VelocityDisplay, 1.0f);
+
+        return;
+    }
+
+    if (DebugMode == 6 || DebugMode == 7)
+    {
+        // AJ output is compact/view-local, while the callback SceneColor
+        // retains the coordinates of its underlying post-process texture.
+        const int2 ScenePixel =
+            int2(DispatchThreadId.xy) + ViewRectMin;
+
+        float4 InputSceneColor =
+            SceneColorTexture.Load(
+                int3(ScenePixel, 0));
+
+        if (DebugMode == 7)
+        {
+            // Unreal stores the working HDR SceneColor in pre-exposed space.
+            // Removing pre-exposure is purely diagnostic here; downstream
+            // post processing still expects the normal pre-exposed
+            // representation.
+            InputSceneColor.rgb *=
+                View.OneOverPreExposure;
+        }
+
+        OutputTexture[DispatchThreadId.xy] =
+            InputSceneColor;
 
         return;
     }

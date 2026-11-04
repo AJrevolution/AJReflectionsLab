@@ -84,18 +84,11 @@ FAJReflectionsViewExtension::PostProcessAfterDOF_RenderThread(
             GraphBuilder);
     }
 
-    const FIntPoint ViewSize =
-        SceneColor.ViewRect.Size();
-
-    const FIntPoint ViewRectMin =
-        SceneColor.ViewRect.Min;
-
     const FScreenPassTexture DebugOutput =
         AddAJDebugPass(
             GraphBuilder,
             View,
-            ViewSize,
-            ViewRectMin,
+            SceneColor,
             Inputs.SceneTextures);
 
     if (!DebugOutput.IsValid())

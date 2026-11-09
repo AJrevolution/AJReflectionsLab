@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AJDebugShader.h"
+#include "AJReflectionTrace.h"
 
 #include "GlobalShader.h"
 #include "HAL/IConsoleManager.h"
@@ -9,6 +10,7 @@
 #include "SceneTexturesConfig.h"
 #include "SceneView.h"
 #include "ShaderParameterStruct.h"
+#include "ShaderPermutation.h"
 
 namespace
 {
@@ -23,7 +25,10 @@ namespace
         TEXT("4: Roughness\n")
         TEXT("5: Scene velocity\n")
         TEXT("6: Scene color\n")
-        TEXT("7: Scene color without pre-exposure\n"),
+        TEXT("7: Scene color without pre-exposure\n")
+        TEXT("8: Hardware reflection hit mask\n")
+        TEXT("9: Hardware reflection hit distance\n")
+        TEXT("10: Hardware reflection direction\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(
@@ -43,11 +48,19 @@ namespace
         ECVF_RenderThreadSafe);
 }
 
+int32 GetAJDebugMode_AnyThread()
+{
+    return CVarAJReflectionsDebugMode.GetValueOnAnyThread();
+}
+
 class FAJDebugCS : public FGlobalShader
 {
 public:
     DECLARE_GLOBAL_SHADER(FAJDebugCS);
     SHADER_USE_PARAMETER_STRUCT(FAJDebugCS, FGlobalShader);
+
+    class FTraceAvailable : SHADER_PERMUTATION_BOOL("AJ_TRACE_AVAILABLE");
+    using FPermutationDomain = TShaderPermutationDomain<FTraceAvailable>;
 
     BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
         SHADER_PARAMETER(FIntPoint, OutputSize)
@@ -55,6 +68,7 @@ public:
         SHADER_PARAMETER(int32, DebugMode)
         SHADER_PARAMETER(float, DebugViewZMax)
         SHADER_PARAMETER(float, DebugVelocityScale)
+        SHADER_PARAMETER(float, DebugTraceDistanceMax)
 
         SHADER_PARAMETER_STRUCT_REF(
             FViewUniformShaderParameters,
@@ -67,6 +81,9 @@ public:
         SHADER_PARAMETER_RDG_TEXTURE_SRV(
             Texture2D,
             SceneColorTexture)
+
+        SHADER_PARAMETER_RDG_TEXTURE(Texture2D, TraceDataTexture)
+        SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, TraceFlagsTexture)
 
         SHADER_PARAMETER_RDG_TEXTURE_UAV(
             RWTexture2D<float4>,
@@ -84,7 +101,8 @@ FScreenPassTexture AddAJDebugPass(
     FRDGBuilder& GraphBuilder,
     const FSceneView& View,
     const FScreenPassTextureSlice& SceneColor,
-    const FSceneTextureShaderParameters& SceneTextures)
+    const FSceneTextureShaderParameters& SceneTextures,
+    const FAJReflectionTraceOutputs* TraceOutputs)
 {
     if (!SceneColor.IsValid())
     {
@@ -136,6 +154,9 @@ FScreenPassTexture AddAJDebugPass(
             CVarAJReflectionsDebugVelocityScale.GetValueOnRenderThread(),
             0.0f);
 
+    PassParameters->DebugTraceDistanceMax =
+        FMath::Max(GetAJReflectionMaxTraceDistance_RenderThread(), 1.0f);
+
     PassParameters->View =
         View.ViewUniformBuffer;
 
@@ -144,12 +165,18 @@ FScreenPassTexture AddAJDebugPass(
     PassParameters->SceneColorTexture =
         SceneColor.TextureSRV;
 
+    const bool bTraceAvailable = TraceOutputs != nullptr && TraceOutputs->IsValid();
+    PassParameters->TraceDataTexture = bTraceAvailable ? TraceOutputs->TraceData : nullptr;
+    PassParameters->TraceFlagsTexture = bTraceAvailable ? TraceOutputs->TraceFlags : nullptr;
+
     PassParameters->OutputTexture =
         GraphBuilder.CreateUAV(
             FRDGTextureUAVDesc(OutputTexture));
 
+    FAJDebugCS::FPermutationDomain PermutationVector;
+    PermutationVector.Set<FAJDebugCS::FTraceAvailable>(bTraceAvailable);
     const TShaderMapRef<FAJDebugCS> ComputeShader(
-        GetGlobalShaderMap(View.GetShaderPlatform()));
+        GetGlobalShaderMap(View.GetShaderPlatform()), PermutationVector);
 
     const FIntVector GroupCount =
         FComputeShaderUtils::GetGroupCount(

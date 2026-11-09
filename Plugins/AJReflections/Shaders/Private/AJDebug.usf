@@ -9,8 +9,13 @@ int2 ViewRectMin;
 int DebugMode;
 float DebugViewZMax;
 float DebugVelocityScale;
+float DebugTraceDistanceMax;
 
 Texture2D SceneColorTexture;
+#if AJ_TRACE_AVAILABLE
+Texture2D<float4> TraceDataTexture;
+Texture2D<uint> TraceFlagsTexture;
+#endif
 RWTexture2D<float4> OutputTexture;
 
 [numthreads(8, 8, 1)]
@@ -201,6 +206,41 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
         return;
     }
+    
+    if (DebugMode >= 8 && DebugMode <= 10)
+    {
+#if AJ_TRACE_AVAILABLE
+        // These are view-local outputs; there is no scene ViewRect offset here.
+        const uint Flags = TraceFlagsTexture.Load(int3(DispatchThreadId.xy, 0));
+        const bool bPrimaryValid = (Flags & 1u) != 0u;
+        const bool bHit = (Flags & 2u) != 0u;
+        const float4 TraceData = TraceDataTexture.Load(int3(DispatchThreadId.xy, 0));
+        float3 Display = 0.0f;
+
+        if (DebugMode == 8)
+        {
+            Display = bHit ? 1.0f : 0.0f;
+        }
+        else if (DebugMode == 9)
+        {
+            const float DistanceDisplay = bHit
+                ? saturate(TraceData.w / DebugTraceDistanceMax)
+                : 0.0f;
+            Display = float3(DistanceDisplay, DistanceDisplay, DistanceDisplay);
+        }
+        else if (bPrimaryValid)
+        {
+            Display = TraceData.xyz * 0.5f + 0.5f;
+        }
+
+        OutputTexture[DispatchThreadId.xy] = float4(Display, 1.0f);
+#else
+        // Inline RT unavailable, disabled or no TLAS for this view.
+        OutputTexture[DispatchThreadId.xy] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+#endif
+        return;
+    }
+
 
     // DebugMode 0, and the safe fallback for unsupported values:
     // preserve the known-good Week 1 UV gradient.

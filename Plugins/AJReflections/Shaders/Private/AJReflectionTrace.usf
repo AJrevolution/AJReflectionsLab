@@ -1,0 +1,89 @@
+// AJReflections - Week 3A: material-agnostic hardware reflection intersection.
+// TraceData: xyz = normalized reflection direction; w = committed hit T in uu (0 on miss).
+// TraceFlags: bit 0 = valid primary surface; bit 1 = committed hit.
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "/Engine/Private/RayTracing/RayTracingCommon.ush"
+#include "/Engine/Private/RayTracing/TraceRayInline.ush"
+
+int2 OutputSize;
+int2 ViewRectMin;
+float MaxTraceDistance;
+
+RaytracingAccelerationStructure TLAS;
+RWTexture2D<float4> TraceData;
+RWTexture2D<uint> TraceFlags;
+
+[numthreads(8, 4, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint2 LocalPixel = DispatchThreadId.xy;
+    if (LocalPixel.x >= (uint)OutputSize.x || LocalPixel.y >= (uint)OutputSize.y)
+    {
+        return;
+    }
+
+    // Every dispatched pixel gets defined outputs, including invalid surfaces.
+    TraceData[LocalPixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    TraceFlags[LocalPixel] = 0u;
+
+    const uint2 ScenePixel = uint2(int2(LocalPixel) + ViewRectMin);
+    const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ScenePixel, 0)).r;
+
+    // UE 5.8 uses reversed device depth: the background/clear value is zero.
+    if (DeviceZ <= 0.0f)
+    {
+        return;
+    }
+
+    // Only the primary visible surface uses the current screen-space GBuffer.
+    // Do not use GBufferData to model the off-screen material at the ray hit.
+    const FGBufferData GBufferData = GetGBufferDataUint(ScenePixel, true);
+    if (GBufferData.ShadingModelID == SHADINGMODELID_UNLIT)
+    {
+        return;
+    }
+
+    const float3 WorldNormal = normalize(GBufferData.WorldNormal);
+    const float3 SurfacePosition = ReconstructTranslatedWorldPositionFromDeviceZ(ScenePixel, DeviceZ);
+    const float3 IncidentDirection = normalize(SurfacePosition - View.TranslatedWorldCameraOrigin);
+    const float3 ReflectionDirection = normalize(reflect(IncidentDirection, WorldNormal));
+
+    // Primary validity is independent of whether the secondary ray hits.
+    uint Flags = 1u;
+    float HitT = 0.0f;
+
+    if (MaxTraceDistance > 0.0f)
+    {
+        FRayDesc Ray;
+        Ray.Origin = SurfacePosition;
+        Ray.Direction = ReflectionDirection;
+        Ray.TMin = 0.0f;
+        Ray.TMax = MaxTraceDistance;
+
+        // UE-native camera-relative and normal-offset bias; zero here means
+        // no additional absolute AJ-specific bias beyond the engine helper.
+        ApplyCameraRelativeDepthBias(Ray, ScenePixel, DeviceZ, WorldNormal, 0.0f);
+
+        // Opaque-reflection instance mask; force alpha-tested triangles opaque.
+        // This first proof does not perform material/alpha evaluation.
+        const uint RayFlags = RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+        const FTraceRayInlineContext TraceContext = CreateTraceRayInlineContext();
+        FTraceRayInlineResult Hit = TraceRayInline(
+            TLAS,
+            RayFlags,
+            RAY_TRACING_MASK_OPAQUE_REFLECTION,
+            Ray.GetNativeDesc(),
+            TraceContext);
+
+        if (Hit.IsHit())
+        {
+            Flags |= 2u;
+            HitT = Hit.HitT;
+        }
+    }
+
+    TraceData[LocalPixel] = float4(ReflectionDirection, HitT);
+    TraceFlags[LocalPixel] = Flags;
+}

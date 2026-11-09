@@ -25,6 +25,8 @@ public:
     virtual bool IsActiveThisFrame_Internal(
         const FSceneViewExtensionContext& Context) const override;
 
+    virtual ESceneViewExtensionFlags GetFlags() const override;
+
     virtual void SubscribeToPostProcessingPass(
         EPostProcessingPass Pass,
         const FSceneView& InView,

@@ -2,7 +2,11 @@
 
 #include "/Engine/Private/Common.ush"
 #include "/Engine/Public/Platform.ush"
+#define SUBSTRATE_SSS_MATERIAL_OVERRIDE 0
+#define SUBSTRATE_SSS_TRANSMISSION 0
+#define SUBSTRATE_COMPLEXSPECIALPATH 1
 #include "/Engine/Private/DeferredShadingCommon.ush"
+#include "/AJReflections/Private/AJSubstrateMaterial.ush"
 
 int2 OutputSize;
 int2 ViewRectMin;
@@ -70,55 +74,25 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
     if (DebugMode == 3 || DebugMode == 4)
     {
-        // AJReflections output is compact/view-local, while the GBuffer is
-        // addressed in renderer scene-texture coordinates.
-        const uint2 ScenePixel =
-            uint2(int2(DispatchThreadId.xy) + ViewRectMin);
-
-        // Decode semantic renderer data rather than depending on fixed
-        // GBuffer texture/channel packing. Passing true requests a
-        // normalized world-space normal from Unreal's decoder.
-        const FGBufferData GBuffer =
-            GetGBufferDataUint(ScenePixel, true);
-
-        // Sky/background and unlit surfaces do not provide the opaque,
-        // deferred surface data that the future reflection tracer needs.
-        // Keep this as a small debug safeguard rather than a full validity
-        // system.
-        if (GBuffer.ShadingModelID == SHADINGMODELID_UNLIT)
+        const uint2 ScenePixel = uint2(int2(DispatchThreadId.xy) + ViewRectMin);
+        const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ScenePixel, 0)).r;
+        const FAJPrimarySurfaceDiagnostic Primary = AJReadPrimarySurface(ScenePixel);
+        if (DeviceZ <= 0.0f || !Primary.bValid)
         {
-            OutputTexture[DispatchThreadId.xy] =
-                float4(0.0f, 0.0f, 0.0f, 1.0f);
-
+            OutputTexture[DispatchThreadId.xy] = float4(0, 0, 0, 1);
             return;
         }
 
         if (DebugMode == 3)
         {
-            const float3 WorldNormal =
-                GBuffer.WorldNormal;
-
-            // Display-only mapping from [-1, 1] into [0, 1].
-            const float3 NormalDisplay =
-                WorldNormal * 0.5f + 0.5f;
-
             OutputTexture[DispatchThreadId.xy] =
-                float4(NormalDisplay, 1.0f);
-
-            return;
+                float4(Primary.WorldNormal * 0.5f + 0.5f, 1.0f);
         }
-
-        // DebugMode 4: semantic renderer roughness, already in [0, 1].
-        const float Roughness =
-            GBuffer.Roughness;
-
-        OutputTexture[DispatchThreadId.xy] =
-            float4(
-                Roughness,
-                Roughness,
-                Roughness,
-                1.0f);
-
+        else
+        {
+            OutputTexture[DispatchThreadId.xy] =
+                float4(float3(Primary.Roughness, Primary.Roughness, Primary.Roughness), 1.0f);
+        }
         return;
     }
 
@@ -241,6 +215,31 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
+    if (DebugMode == 11 || DebugMode == 12)
+    {
+        const uint2 ScenePixel = uint2(int2(DispatchThreadId.xy) + ViewRectMin);
+        const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ScenePixel, 0)).r;
+        const FAJPrimarySurfaceDiagnostic Primary = AJReadPrimarySurface(ScenePixel);
+        if (DeviceZ <= 0.0f || !Primary.bValid)
+        {
+            OutputTexture[DispatchThreadId.xy] = float4(0, 0, 0, 1);
+            return;
+        }
+
+        if (DebugMode == 11)
+        {
+            const uint ClosureCount = AJReadPrimaryClosureCount(ScenePixel, Primary.bValid);
+            // Discrete: 0 black, 1 dark grey, 2 mid grey, 3 light grey, 4+ white.
+            const float Grey = 0.25f * float(min(ClosureCount, 4u));
+            OutputTexture[DispatchThreadId.xy] = float4(float3(Grey, Grey, Grey), 1.0f);
+        }
+        else
+        {
+            const float3 F0 = AJReadPrimaryTopClosureF0(ScenePixel, Primary.bValid);
+            OutputTexture[DispatchThreadId.xy] = float4(F0, 1.0f);
+        }
+        return;
+    }
 
     // DebugMode 0, and the safe fallback for unsupported values:
     // preserve the known-good Week 1 UV gradient.

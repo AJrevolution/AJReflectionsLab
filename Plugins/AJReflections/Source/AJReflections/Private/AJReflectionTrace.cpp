@@ -11,6 +11,7 @@
 #include "SceneView.h"
 #include "ShaderParameterStruct.h"
 #include "ShaderCompilerCore.h"
+#include "Substrate/SubstrateViewParameters.h"
 
 namespace
 {
@@ -64,6 +65,7 @@ public:
         SHADER_PARAMETER(float, MaxTraceDistance)
         SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
         SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureShaderParameters, SceneTextures)
+        SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
         SHADER_PARAMETER_RDG_BUFFER_SRV(RaytracingAccelerationStructure, TLAS)
         SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, TraceData)
         SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, TraceFlags)
@@ -106,6 +108,7 @@ FAJReflectionTraceOutputs AddAJReflectionTracePass(
 #if RHI_RAYTRACING
     const FIntPoint ViewSize = SceneColorViewRect.Size();
     if (TLAS == nullptr || !SceneTextures.SceneTextures
+        || View.GetSubstrateGlobalUniformBuffer() == nullptr
         || ViewSize.X <= 0 || ViewSize.Y <= 0
         || !CanAJReflectionTrace_RenderThread(View))
     {
@@ -133,6 +136,7 @@ FAJReflectionTraceOutputs AddAJReflectionTracePass(
     PassParameters->MaxTraceDistance = GetAJReflectionMaxTraceDistance_RenderThread();
     PassParameters->View = View.ViewUniformBuffer;
     PassParameters->SceneTextures = SceneTextures;
+    PassParameters->Substrate = View.GetSubstrateGlobalUniformBuffer();
     PassParameters->TLAS = TLAS;
     PassParameters->TraceData = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.TraceData));
     PassParameters->TraceFlags = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.TraceFlags));

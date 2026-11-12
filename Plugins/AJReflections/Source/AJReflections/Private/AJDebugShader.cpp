@@ -11,6 +11,7 @@
 #include "SceneView.h"
 #include "ShaderParameterStruct.h"
 #include "ShaderPermutation.h"
+#include "Substrate/SubstrateViewParameters.h"
 
 namespace
 {
@@ -28,7 +29,9 @@ namespace
         TEXT("7: Scene color without pre-exposure\n")
         TEXT("8: Hardware reflection hit mask\n")
         TEXT("9: Hardware reflection hit distance\n")
-        TEXT("10: Hardware reflection direction\n"),
+        TEXT("10: Hardware reflection direction\n")
+        TEXT("11: Substrate stored closure count\n")
+        TEXT("12: Primary/top Substrate closure F0\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(
@@ -77,6 +80,8 @@ public:
         SHADER_PARAMETER_STRUCT_INCLUDE(
             FSceneTextureShaderParameters,
             SceneTextures)
+
+        SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
 
         SHADER_PARAMETER_RDG_TEXTURE_SRV(
             Texture2D,
@@ -161,6 +166,8 @@ FScreenPassTexture AddAJDebugPass(
         View.ViewUniformBuffer;
 
     PassParameters->SceneTextures = SceneTextures;
+    
+    PassParameters->Substrate = View.GetSubstrateGlobalUniformBuffer();
 
     PassParameters->SceneColorTexture =
         SceneColor.TextureSRV;

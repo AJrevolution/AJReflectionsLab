@@ -1,0 +1,113 @@
+// AJReflections — Week 3B primary-visible-surface Substrate diagnostics.
+// This is not a general material ABI or an off-screen hit-material interface.
+// Caller includes DeferredShadingCommon.ush and binds the native Substrate UB.
+#pragma once
+
+#include "/Engine/Private/Substrate/SubstrateRead.ush"
+
+// Mirrors UE 5.8.1's SubstrateDeferredLighting.ush choice between the
+// Adaptive material container and the simplified Blendable path.
+#ifndef SUBSTRATE_LOAD_FROM_MATERIALCONTAINER
+    #if SUBSTRATE_GBUFFER_FORMAT == 1
+        #define SUBSTRATE_LOAD_FROM_MATERIALCONTAINER 1
+    #else
+        #define SUBSTRATE_LOAD_FROM_MATERIALCONTAINER 0
+    #endif
+#endif
+
+// Only the orientation and roughness of the current visible surface.
+// Other material closures remain in Unreal's own representation.
+struct FAJPrimarySurfaceDiagnostic
+{
+    bool bValid;
+    float3 WorldNormal;
+    float Roughness;
+};
+
+FAJPrimarySurfaceDiagnostic AJReadPrimarySurface(uint2 ScenePixel)
+{
+    FAJPrimarySurfaceDiagnostic Out = (FAJPrimarySurfaceDiagnostic)0;
+
+#if SUBSTRATE_LOAD_FROM_MATERIALCONTAINER
+    // The top-layer texture is Unreal's designated visible-surface summary.
+    // It does not describe all the closures in the material container.
+    const FSubstrateTopLayerData TopLayer = SubstrateUnpackTopLayerData(
+        Substrate.TopLayerTexture.Load(int3(ScenePixel, 0)));
+    Out.bValid = IsSubstrateMaterial(TopLayer);
+    if (Out.bValid)
+    {
+        Out.WorldNormal = normalize(TopLayer.WorldNormal);
+        Out.Roughness = TopLayer.Roughness;
+    }
+#else
+    // Preserve Week 3A's original Blendable primary-surface semantics.
+    const FGBufferData GBuffer = GetGBufferDataUint(ScenePixel, true);
+    Out.bValid = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT;
+    if (Out.bValid)
+    {
+        Out.WorldNormal = normalize(GBuffer.WorldNormal);
+        Out.Roughness = GBuffer.Roughness;
+    }
+#endif
+    return Out;
+}
+
+// Exact stored closure count, not a classification inferred from roughness.
+uint AJReadPrimaryClosureCount(uint2 ScenePixel, bool bPrimaryValid)
+{
+    if (!bPrimaryValid)
+    {
+        return 0u;
+    }
+
+#if SUBSTRATE_LOAD_FROM_MATERIALCONTAINER
+    FSubstrateAddressing Addressing = GetSubstratePixelDataByteOffset(
+        ScenePixel, uint2(View.BufferSizeAndInvSize.xy), Substrate.MaxBytesPerPixel);
+    const FSubstratePixelHeader Header = UnpackSubstrateHeaderIn(
+        Substrate.MaterialTextureArray, Addressing, Substrate.TopLayerTexture);
+    return Header.ClosureCount;
+#else
+    // A Blendable GBuffer stores one simplified representable closure.
+    return 1u;
+#endif
+}
+
+// Diagnostic F0 of the first explicitly flagged top closure. Complex
+// materials can have multiple top closures: this intentionally is NOT a
+// combined/effective F0 for every possible light/view direction.
+float3 AJReadPrimaryTopClosureF0(uint2 ScenePixel, bool bPrimaryValid)
+{
+    if (!bPrimaryValid)
+    {
+        return 0.0f;
+    }
+
+#if SUBSTRATE_LOAD_FROM_MATERIALCONTAINER
+    FSubstrateAddressing Addressing = GetSubstratePixelDataByteOffset(
+        ScenePixel, uint2(View.BufferSizeAndInvSize.xy), Substrate.MaxBytesPerPixel);
+    const FSubstratePixelHeader Header = UnpackSubstrateHeaderIn(
+        Substrate.MaterialTextureArray, Addressing, Substrate.TopLayerTexture);
+
+    // BSDF storage is variable-length; only Unreal's native sequential
+    // unpacker advances the address correctly. Do not index packed uints.
+    [loop]
+    for (uint ClosureIndex = 0u;
+         ClosureIndex < min(Header.ClosureCount, (uint)SUBSTRATE_MAX_CLOSURE_COUNT);
+         ++ClosureIndex)
+    {
+        const FSubstrateBSDF BSDF = UnpackSubstrateBSDFIn(
+            Substrate.MaterialTextureArray, Addressing, Header);
+        if (BSDF_GETISTOPLAYER(BSDF) != 0u)
+        {
+            return SubstrateGetBSDFSpecularF0(BSDF);
+        }
+    }
+    return 0.0f;
+#else
+    // Native conversion of the representable Blendable surface to a
+    // Substrate BSDF; no legacy BaseColor/Metallic/Specular F0 formula.
+    const FScreenSpaceData ScreenSpaceData = GetScreenSpaceDataUint(ScenePixel);
+    const FSubstrateGBufferBSDF Result = SubstrateReadGBufferBSDF(ScreenSpaceData);
+    return SubstrateGetBSDFSpecularF0(Result.BSDF);
+#endif
+}

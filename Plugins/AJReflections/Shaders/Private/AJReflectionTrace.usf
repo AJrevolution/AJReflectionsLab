@@ -3,9 +3,14 @@
 // TraceFlags: bit 0 = valid primary surface; bit 1 = committed hit.
 
 #include "/Engine/Private/Common.ush"
+// Match UE's Substrate inspection setup before RayTracingCommon includes Substrate.ush.
+#define SUBSTRATE_SSS_MATERIAL_OVERRIDE 0
+#define SUBSTRATE_SSS_TRANSMISSION 0
+#define SUBSTRATE_COMPLEXSPECIALPATH 1
 #include "/Engine/Private/DeferredShadingCommon.ush"
 #include "/Engine/Private/RayTracing/RayTracingCommon.ush"
 #include "/Engine/Private/RayTracing/TraceRayInline.ush"
+#include "/AJReflections/Private/AJSubstrateMaterial.ush"
 
 int2 OutputSize;
 int2 ViewRectMin;
@@ -37,15 +42,16 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    // Only the primary visible surface uses the current screen-space GBuffer.
-    // Do not use GBufferData to model the off-screen material at the ray hit.
-    const FGBufferData GBufferData = GetGBufferDataUint(ScenePixel, true);
-    if (GBufferData.ShadingModelID == SHADINGMODELID_UNLIT)
+    // A primary-visible-surface summary, not an off-screen hit material ABI.
+    // Adaptive reads native Substrate top-layer data; Blendable preserves
+    // the original Week 3A GBuffer semantics.
+    const FAJPrimarySurfaceDiagnostic Primary = AJReadPrimarySurface(ScenePixel);
+    if (!Primary.bValid)
     {
         return;
     }
 
-    const float3 WorldNormal = normalize(GBufferData.WorldNormal);
+    const float3 WorldNormal = Primary.WorldNormal;
     const float3 SurfacePosition = ReconstructTranslatedWorldPositionFromDeviceZ(ScenePixel, DeviceZ);
     const float3 IncidentDirection = normalize(SurfacePosition - View.TranslatedWorldCameraOrigin);
     const float3 ReflectionDirection = normalize(reflect(IncidentDirection, WorldNormal));

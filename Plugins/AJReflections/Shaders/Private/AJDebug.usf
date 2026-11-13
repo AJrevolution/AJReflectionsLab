@@ -19,6 +19,8 @@ Texture2D SceneColorTexture;
 #if AJ_TRACE_AVAILABLE
 Texture2D<float4> TraceDataTexture;
 Texture2D<uint> TraceFlagsTexture;
+Texture2D<float4> SampleDataTexture;
+Texture2D<uint> SampleFlagsTexture;
 #endif
 RWTexture2D<float4> OutputTexture;
 
@@ -202,7 +204,8 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
                 : 0.0f;
             Display = float3(DistanceDisplay, DistanceDisplay, DistanceDisplay);
         }
-        else if (bPrimaryValid)
+         else if (bPrimaryValid &&
+                 (SampleFlagsTexture.Load(int3(DispatchThreadId.xy, 0)) & AJ_SAMPLE_FLAG_VALID) != 0u)
         {
             Display = TraceData.xyz * 0.5f + 0.5f;
         }
@@ -241,6 +244,56 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
+    if (DebugMode >= 13 && DebugMode <= 15)
+    {
+#if AJ_TRACE_AVAILABLE
+        const uint2 Pixel = DispatchThreadId.xy;
+        const uint Packed = SampleFlagsTexture.Load(int3(Pixel, 0));
+        if ((Packed & AJ_SAMPLE_FLAG_VALID) == 0u)
+        {
+            OutputTexture[Pixel] = float4(0, 0, 0, 1);
+            return;
+        }
+
+        const float4 Data = SampleDataTexture.Load(int3(Pixel, 0));
+        float3 Display = 0.0f;
+        if (DebugMode == 13)
+        {
+            const uint Class = (Packed >> AJ_SAMPLE_FLAG_CLASS_SHIFT) & 7u;
+            const uint ClosureIndex = (Packed >> AJ_SAMPLE_FLAG_CLOSURE_SHIFT) & 15u;
+            if (Class == AJ_SAMPLE_CLASS_MIRROR)                  Display = float3(1, 1, 1);
+            else if (Class == AJ_SAMPLE_CLASS_GGX_ISOTROPIC)    Display = float3(0, 1, 0);
+            else if (Class == AJ_SAMPLE_CLASS_GGX_ANISOTROPIC)  Display = float3(0, 1, 1);
+            else if (Class == AJ_SAMPLE_CLASS_COMPLEX_FALLBACK) Display = float3(1, 0, 1);
+
+            // Indicate selected stored closure index for multi-closure pixels;
+            // the class remains identifiable by colour and the index is integer metadata.
+            if ((Packed & AJ_SAMPLE_FLAG_MULTI_CLOSURE) != 0u)
+            {
+                const float Brightness = 0.55f + 0.45f * frac(float(ClosureIndex) * 0.382f);
+                Display *= Brightness;
+            }
+        }
+        else if (DebugMode == 14)
+        {
+            const float RoughnessDisplay = saturate(Data.z);
+            Display = float3(RoughnessDisplay, RoughnessDisplay, RoughnessDisplay);
+            // Display only; SampleData.z is unmodified.
+        }
+        else
+        {
+            // PDFs are densities, often greater than 1. This is display only.
+            const float P = max(Data.x, 0.0f);
+            const float PDFDisplay = P / (1.0f + P);
+            Display = float3(PDFDisplay, PDFDisplay, PDFDisplay);
+        }
+        OutputTexture[Pixel] = float4(Display, 1.0f);
+#else
+        OutputTexture[DispatchThreadId.xy] = float4(0, 0, 0, 1);
+#endif
+        return;
+    }
+    
     // DebugMode 0, and the safe fallback for unsupported values:
     // preserve the known-good Week 1 UV gradient.
     const float2 UV =

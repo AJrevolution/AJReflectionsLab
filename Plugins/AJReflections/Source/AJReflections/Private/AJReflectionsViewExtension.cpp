@@ -39,7 +39,9 @@ bool FAJReflectionsViewExtension::IsActiveThisFrame_Internal(
 ESceneViewExtensionFlags FAJReflectionsViewExtension::GetFlags() const
 {
     const int32 Mode = GetAJDebugMode_AnyThread();
-    return IsAJReflectionTracingEnabled_AnyThread() && Mode >= 8 && Mode <= 10
+    const bool bNeedsTraceDiagnostics = (Mode >= 8 && Mode <= 10)
+        || (Mode >= 13 && Mode <= 15);
+    return IsAJReflectionTracingEnabled_AnyThread() && bNeedsTraceDiagnostics
         ? ESceneViewExtensionFlags::RequiresHardwareInlineRayTracing
         : ESceneViewExtensionFlags::None;
 }
@@ -96,7 +98,10 @@ FAJReflectionsViewExtension::PostProcessAfterDOF_RenderThread(
     FAJReflectionTraceOutputs TraceOutputs;
     const int32 DebugMode = GetAJDebugMode_AnyThread();
 
-    if (DebugMode >= 8 && DebugMode <= 10
+    const bool bNeedsTraceDiagnostics = (DebugMode >= 8 && DebugMode <= 10)
+        || (DebugMode >= 13 && DebugMode <= 15);
+
+    if (bNeedsTraceDiagnostics
         && IsAJReflectionTracingEnabled_AnyThread()
         && CanAJReflectionTrace_RenderThread(View))
     {

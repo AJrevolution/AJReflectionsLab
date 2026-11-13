@@ -1,63 +1,91 @@
-// AJReflections - Week 3A: material-agnostic hardware reflection intersection.
-// TraceData: xyz = normalized reflection direction; w = committed hit T in uu (0 on miss).
-// TraceFlags: bit 0 = valid primary surface; bit 1 = committed hit.
+// AJReflections — Week 3C: one Substrate-selected stochastic reflection ray.
+// Existing ABI: TraceData.rgb = actually traced direction; a = committed hit T.
+// TraceFlags bit 0 = valid primary; bit 1 = committed hit.
+// SampleData = (combined PDF, closure-selection probability, roughness, anisotropy).
+// SampleFlags layout is defined in AJSubstrateMaterial.ush.
 
 #include "/Engine/Private/Common.ush"
-// Match UE's Substrate inspection setup before RayTracingCommon includes Substrate.ush.
 #define SUBSTRATE_SSS_MATERIAL_OVERRIDE 0
 #define SUBSTRATE_SSS_TRANSMISSION 0
 #define SUBSTRATE_COMPLEXSPECIALPATH 1
 #include "/Engine/Private/DeferredShadingCommon.ush"
 #include "/Engine/Private/RayTracing/RayTracingCommon.ush"
 #include "/Engine/Private/RayTracing/TraceRayInline.ush"
+#define AJ_ENABLE_PRIMARY_REFLECTION_SAMPLING 1
 #include "/AJReflections/Private/AJSubstrateMaterial.ush"
 
 int2 OutputSize;
 int2 ViewRectMin;
 float MaxTraceDistance;
+int StochasticSampling;
+int SampleFrameOverride;
 
 RaytracingAccelerationStructure TLAS;
 RWTexture2D<float4> TraceData;
 RWTexture2D<uint> TraceFlags;
+RWTexture2D<float4> SampleData;
+RWTexture2D<uint> SampleFlags;
 
 [numthreads(8, 4, 1)]
 void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
     const uint2 LocalPixel = DispatchThreadId.xy;
-    if (LocalPixel.x >= (uint)OutputSize.x || LocalPixel.y >= (uint)OutputSize.y)
+    if (LocalPixel.x >= (uint) OutputSize.x || LocalPixel.y >= (uint) OutputSize.y)
     {
         return;
     }
 
-    // Every dispatched pixel gets defined outputs, including invalid surfaces.
-    TraceData[LocalPixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    // Every pixel is defined, including sky, invalid materials and bad samples.
+    TraceData[LocalPixel] = float4(0, 0, 0, 0);
     TraceFlags[LocalPixel] = 0u;
+    SampleData[LocalPixel] = float4(0, 0, 0, 0);
+    SampleFlags[LocalPixel] = 0u;
 
     const uint2 ScenePixel = uint2(int2(LocalPixel) + ViewRectMin);
     const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ScenePixel, 0)).r;
-
-    // UE 5.8 uses reversed device depth: the background/clear value is zero.
     if (DeviceZ <= 0.0f)
     {
         return;
     }
 
-    // A primary-visible-surface summary, not an off-screen hit material ABI.
-    // Adaptive reads native Substrate top-layer data; Blendable preserves
-    // the original Week 3A GBuffer semantics.
     const FAJPrimarySurfaceDiagnostic Primary = AJReadPrimarySurface(ScenePixel);
-    if (!Primary.bValid)
+    if (!Primary.bValid || !all(IsFinite(Primary.WorldNormal))
+        || !IsFinite(Primary.Roughness))
     {
         return;
     }
 
+    // Primary validity is independent from sample validity and secondary hit.
+    uint Flags = 1u;
+    TraceFlags[LocalPixel] = Flags;
+
     const float3 WorldNormal = Primary.WorldNormal;
     const float3 SurfacePosition = ReconstructTranslatedWorldPositionFromDeviceZ(ScenePixel, DeviceZ);
     const float3 IncidentDirection = normalize(SurfacePosition - View.TranslatedWorldCameraOrigin);
-    const float3 ReflectionDirection = normalize(reflect(IncidentDirection, WorldNormal));
+    const uint SampleFrameIndex = SampleFrameOverride >= 0
+        ? (uint) SampleFrameOverride : View.StateFrameIndex;
 
-    // Primary validity is independent of whether the secondary ray hits.
-    uint Flags = 1u;
+    const FAJPrimaryReflectionSample Sample = AJGeneratePrimaryReflectionSample(
+        ScenePixel, Primary, IncidentDirection,
+        StochasticSampling != 0, SampleFrameIndex);
+
+    // PDF remains semantic; display normalization is exclusively a debug task.
+    const float CombinedPDF = Sample.bValid
+        ? (Sample.SelectionProbability * Sample.DirectionalPDF) : 0.0f;
+    SampleData[LocalPixel] = float4(
+        CombinedPDF,
+        Sample.bValid ? Sample.SelectionProbability : 0.0f,
+        Sample.Roughness,
+        Sample.Anisotropy);
+    SampleFlags[LocalPixel] = AJPackPrimaryReflectionSampleFlags(Sample);
+
+    // A failed hemisphere/PDF/finite check never launches a hardware ray.
+    if (!Sample.bValid)
+    {
+        return;
+    }
+
+    const float3 ReflectionDirection = Sample.Direction;
     float HitT = 0.0f;
 
     if (MaxTraceDistance > 0.0f)
@@ -68,12 +96,11 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         Ray.TMin = 0.0f;
         Ray.TMax = MaxTraceDistance;
 
-        // UE-native camera-relative and normal-offset bias; zero here means
-        // no additional absolute AJ-specific bias beyond the engine helper.
+        // Unchanged Week 3A camera-relative ray bias, using the same primary
+        // top-layer normal used before introducing stochastic sampling.
         ApplyCameraRelativeDepthBias(Ray, ScenePixel, DeviceZ, WorldNormal, 0.0f);
 
-        // Opaque-reflection instance mask; force alpha-tested triangles opaque.
-        // This first proof does not perform material/alpha evaluation.
+        // Unchanged Week 3A mask, flags, TLAS and RayQuery semantics.
         const uint RayFlags = RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
         const FTraceRayInlineContext TraceContext = CreateTraceRayInlineContext();
         FTraceRayInlineResult Hit = TraceRayInline(

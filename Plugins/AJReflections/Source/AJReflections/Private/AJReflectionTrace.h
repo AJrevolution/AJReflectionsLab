@@ -10,12 +10,18 @@ class FSceneTextureShaderParameters;
 // Per-callback RDG resources. Never cache these across graphs or frames.
 struct FAJReflectionTraceOutputs
 {
+    // Existing Week 3A material-independent intersection ABI.
     FRDGTextureRef TraceData = nullptr;
     FRDGTextureRef TraceFlags = nullptr;
 
+    // Week 3C independent, current-graph sampling diagnostics.
+    FRDGTextureRef SampleData = nullptr;
+    FRDGTextureRef SampleFlags = nullptr;
+
     bool IsValid() const
     {
-        return TraceData != nullptr && TraceFlags != nullptr;
+        return TraceData != nullptr && TraceFlags != nullptr
+            && SampleData != nullptr && SampleFlags != nullptr;
     }
 };
 

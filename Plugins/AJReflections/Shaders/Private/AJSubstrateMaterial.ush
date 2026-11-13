@@ -1,22 +1,34 @@
-// AJReflections — Week 3B primary-visible-surface Substrate diagnostics.
-// This is not a general material ABI or an off-screen hit-material interface.
-// Caller includes DeferredShadingCommon.ush and binds the native Substrate UB.
+// AJReflections — primary-visible-surface Substrate access and Week 3C sampling.
+// NOT a general material ABI, off-screen hit-material decoder, or radiance sampler.
+// Callers include DeferredShadingCommon.ush and bind the native Substrate UB.
 #pragma once
 
 #include "/Engine/Private/Substrate/SubstrateRead.ush"
 
-// Mirrors UE 5.8.1's SubstrateDeferredLighting.ush choice between the
-// Adaptive material container and the simplified Blendable path.
+// UE's material-container switch is distinct from the on-disk Substrate format.
 #ifndef SUBSTRATE_LOAD_FROM_MATERIALCONTAINER
-    #if SUBSTRATE_GBUFFER_FORMAT == 1
-        #define SUBSTRATE_LOAD_FROM_MATERIALCONTAINER 1
-    #else
-        #define SUBSTRATE_LOAD_FROM_MATERIALCONTAINER 0
-    #endif
+#if SUBSTRATE_GBUFFER_FORMAT == 1
+#define SUBSTRATE_LOAD_FROM_MATERIALCONTAINER 1
+#else
+#define SUBSTRATE_LOAD_FROM_MATERIALCONTAINER 0
+#endif
 #endif
 
-// Only the orientation and roughness of the current visible surface.
-// Other material closures remain in Unreal's own representation.
+// Shared bit layout and classes. SampleFlags is a current-frame diagnostic ABI.
+#define AJ_SAMPLE_FLAG_VALID             (1u << 0u)
+#define AJ_SAMPLE_FLAG_CLOSURE_SHIFT     1u    // 4 bits: [1,4]
+#define AJ_SAMPLE_FLAG_CLASS_SHIFT       5u    // 3 bits: [5,7]
+#define AJ_SAMPLE_FLAG_MULTI_CLOSURE     (1u << 8u)
+#define AJ_SAMPLE_FLAG_COMPLEX_FALLBACK  (1u << 9u)
+
+#define AJ_SAMPLE_CLASS_INVALID          0u
+#define AJ_SAMPLE_CLASS_MIRROR           1u
+#define AJ_SAMPLE_CLASS_GGX_ISOTROPIC    2u
+#define AJ_SAMPLE_CLASS_GGX_ANISOTROPIC  3u
+#define AJ_SAMPLE_CLASS_COMPLEX_FALLBACK 4u
+
+// Only orientation/roughness of the current visible surface. Other material
+// closures remain in UE's native representation.
 struct FAJPrimarySurfaceDiagnostic
 {
     bool bValid;
@@ -26,11 +38,9 @@ struct FAJPrimarySurfaceDiagnostic
 
 FAJPrimarySurfaceDiagnostic AJReadPrimarySurface(uint2 ScenePixel)
 {
-    FAJPrimarySurfaceDiagnostic Out = (FAJPrimarySurfaceDiagnostic)0;
+    FAJPrimarySurfaceDiagnostic Out = (FAJPrimarySurfaceDiagnostic) 0;
 
 #if SUBSTRATE_LOAD_FROM_MATERIALCONTAINER
-    // The top-layer texture is Unreal's designated visible-surface summary.
-    // It does not describe all the closures in the material container.
     const FSubstrateTopLayerData TopLayer = SubstrateUnpackTopLayerData(
         Substrate.TopLayerTexture.Load(int3(ScenePixel, 0)));
     Out.bValid = IsSubstrateMaterial(TopLayer);
@@ -40,7 +50,7 @@ FAJPrimarySurfaceDiagnostic AJReadPrimarySurface(uint2 ScenePixel)
         Out.Roughness = TopLayer.Roughness;
     }
 #else
-    // Preserve Week 3A's original Blendable primary-surface semantics.
+    // Exact Week 3A/3B Blendable primary-surface normal/roughness semantics.
     const FGBufferData GBuffer = GetGBufferDataUint(ScenePixel, true);
     Out.bValid = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT;
     if (Out.bValid)
@@ -52,7 +62,7 @@ FAJPrimarySurfaceDiagnostic AJReadPrimarySurface(uint2 ScenePixel)
     return Out;
 }
 
-// Exact stored closure count, not a classification inferred from roughness.
+// Actual stored closure count; Blendable has only one representable closure.
 uint AJReadPrimaryClosureCount(uint2 ScenePixel, bool bPrimaryValid)
 {
     if (!bPrimaryValid)
@@ -67,14 +77,11 @@ uint AJReadPrimaryClosureCount(uint2 ScenePixel, bool bPrimaryValid)
         Substrate.MaterialTextureArray, Addressing, Substrate.TopLayerTexture);
     return Header.ClosureCount;
 #else
-    // A Blendable GBuffer stores one simplified representable closure.
     return 1u;
 #endif
 }
 
-// Diagnostic F0 of the first explicitly flagged top closure. Complex
-// materials can have multiple top closures: this intentionally is NOT a
-// combined/effective F0 for every possible light/view direction.
+// First explicitly flagged top-closure F0. This is NOT a combined F0.
 float3 AJReadPrimaryTopClosureF0(uint2 ScenePixel, bool bPrimaryValid)
 {
     if (!bPrimaryValid)
@@ -88,8 +95,7 @@ float3 AJReadPrimaryTopClosureF0(uint2 ScenePixel, bool bPrimaryValid)
     const FSubstratePixelHeader Header = UnpackSubstrateHeaderIn(
         Substrate.MaterialTextureArray, Addressing, Substrate.TopLayerTexture);
 
-    // BSDF storage is variable-length; only Unreal's native sequential
-    // unpacker advances the address correctly. Do not index packed uints.
+    // UE's sequential unpacker alone tracks variable-length BSDF storage.
     [loop]
     for (uint ClosureIndex = 0u;
          ClosureIndex < min(Header.ClosureCount, (uint)SUBSTRATE_MAX_CLOSURE_COUNT);
@@ -104,10 +110,306 @@ float3 AJReadPrimaryTopClosureF0(uint2 ScenePixel, bool bPrimaryValid)
     }
     return 0.0f;
 #else
-    // Native conversion of the representable Blendable surface to a
-    // Substrate BSDF; no legacy BaseColor/Metallic/Specular F0 formula.
+    // UE's native Blendable -> representable Substrate BSDF conversion.
     const FScreenSpaceData ScreenSpaceData = GetScreenSpaceDataUint(ScenePixel);
     const FSubstrateGBufferBSDF Result = SubstrateReadGBufferBSDF(ScreenSpaceData);
     return SubstrateGetBSDFSpecularF0(Result.BSDF);
 #endif
 }
+
+// Sampling-only functions compile exclusively in AJReflectionTrace.usf.
+// The debug shader retains the lean Week 3B diagnostic include path.
+#if AJ_ENABLE_PRIMARY_REFLECTION_SAMPLING
+#include "/Engine/Private/MonteCarlo.ush"
+#include "/Engine/Private/PathTracing/Utilities/PathTracingRandomSequence.ush"
+
+// This descriptor exists for *one selected primary lobe* and only for this ray.
+// It is not the material representation of AJReflections.
+struct FAJPrimaryReflectionLobe
+{
+    bool bEligible;
+    uint ClosureIndex;
+    bool bMaterialMultiClosure;
+    float3x3 TangentBasis;   // UE convention: [0] tangent, [1] bitangent, [2] normal.
+    float Roughness;
+    float Anisotropy;
+    float SelectionWeight;
+    float SelectionProbability;
+};
+
+struct FAJPrimaryReflectionSample
+{
+    bool bValid;
+    uint SamplingClass;
+    uint ClosureIndex;
+    bool bMaterialMultiClosure;
+    float3 Direction;
+    float DirectionalPDF;         // Per-steradian for GGX; unit mass for delta/fallback.
+    float SelectionProbability;  // Conditional probability among supported top lobes.
+    float Roughness;
+    float Anisotropy;
+};
+
+bool AJIsSupportedGGXReflectionBSDF(FSubstrateBSDF BSDF)
+{
+    // Only ordinary Slab's main specular lobe is represented by Week 3C.
+    // A second specular lobe (haziness/clear-coat), fuzz, glints, specular
+    // profiles, thin-surface transmission and specialised scattering are NOT.
+    return BSDF_GETTYPE(BSDF) == SUBSTRATE_BSDF_TYPE_SLAB
+        && BSDF_GETHASHAZINESS(BSDF) == 0u
+        && BSDF_GETHASFUZZ(BSDF) == 0u
+        && BSDF_GETHASGLINT(BSDF) == 0u
+        && BSDF_GETHASSPECPROFILE(BSDF) == 0u
+        && BSDF_GETSSSTYPE(BSDF) == SSS_TYPE_NONE
+        && BSDF_GETISTHIN(BSDF) == 0u;
+}
+
+FAJPrimaryReflectionLobe AJMakeSupportedLobe(
+    FSubstrateBSDF BSDF,
+    float3x3 TangentBasis,
+    uint ClosureIndex,
+    float3 V)
+{
+    FAJPrimaryReflectionLobe Out = (FAJPrimaryReflectionLobe)0;
+    if (!AJIsSupportedGGXReflectionBSDF(BSDF))
+    {
+        return Out;
+    }
+
+    const float3 N = TangentBasis[2];
+    const float NoV = dot(N, V);
+    if (!all(IsFinite(N)) || !all(IsFinite(TangentBasis[0]))
+        || NoV <= 1.0e-4f)
+    {
+        return Out;
+    }
+
+    // Both terms come directly from this UE Substrate BSDF (not legacy
+    // metallic/base-color parameters). This is a selection approximation:
+    // the exact multi-closure radiance integral is deferred to hit shading.
+    const float3 F0 = SubstrateGetBSDFSpecularF0(BSDF);
+    const float3 F90 = SubstrateGetBSDFSpecularF90(BSDF);
+    const float StoredRoughness = SubstrateGetBSDFRoughness(BSDF);
+    const float StoredAnisotropy = SubstrateGetBSDFAnisotropy(BSDF);
+    if (!all(IsFinite(F0)) || !all(IsFinite(F90))
+        || !IsFinite(StoredRoughness) || !IsFinite(StoredAnisotropy))
+    {
+        return Out;
+    }
+    const float3 ViewFresnel = max(F_Schlick(F0, F90, saturate(NoV)), 0.0f);
+    const float3 VisibilityWeight = max(BSDF.LuminanceWeightV, 0.0f)
+        * lerp(1.0f, max(BSDF.TransmittanceAboveAlongN, 0.0f),
+               saturate(BSDF.CoverageAboveAlongN));
+    const float3 Importance = VisibilityWeight * ViewFresnel;
+    const float Weight = dot(Importance, float3(0.2126f, 0.7152f, 0.0722f));
+    if (!IsFinite(Weight) || Weight <= 0.0f)
+    {
+        return Out;
+    }
+
+    Out.bEligible = true;
+    Out.ClosureIndex = ClosureIndex;
+    Out.TangentBasis = TangentBasis;
+    Out.Roughness = saturate(StoredRoughness);
+    Out.Anisotropy = clamp(StoredAnisotropy, -1.0f, 1.0f);
+    Out.SelectionWeight = Weight;
+    return Out;
+}
+
+FAJPrimaryReflectionLobe AJSelectPrimaryReflectionLobe(
+    uint2 ScenePixel,
+    float3 V,
+    inout FRandomSequence RandSequence)
+{
+    FAJPrimaryReflectionLobe Selected = (FAJPrimaryReflectionLobe)0;
+    float TotalWeight = 0.0f;
+
+#if SUBSTRATE_LOAD_FROM_MATERIALCONTAINER
+    FSubstrateAddressing Addressing = GetSubstratePixelDataByteOffset(
+        ScenePixel, uint2(View.BufferSizeAndInvSize.xy), Substrate.MaxBytesPerPixel);
+    const FSubstratePixelHeader Header = UnpackSubstrateHeaderIn(
+        Substrate.MaterialTextureArray, Addressing, Substrate.TopLayerTexture);
+    const bool bMultiClosure = Header.ClosureCount > 1u;
+    bool bHasUnsupportedTopClosure = false;
+
+    // Weighted reservoir selection over *eligible top reflection closures*.
+    // Exactly reproduces P(select i) = wi / sum(wj), in one native sequential
+    // container traversal with no temporary closure array or second unpack.
+    [loop]
+    for (uint ClosureIndex = 0u;
+         ClosureIndex < min(Header.ClosureCount, (uint)SUBSTRATE_MAX_CLOSURE_COUNT);
+         ++ClosureIndex)
+    {
+        const FSubstrateBSDF BSDF = UnpackSubstrateBSDFIn(
+            Substrate.MaterialTextureArray, Addressing, Header);
+        if (BSDF_GETISTOPLAYER(BSDF) == 0u)
+        {
+            continue;
+        }
+        if (!AJIsSupportedGGXReflectionBSDF(BSDF))
+        {
+            bHasUnsupportedTopClosure = true;
+            continue;
+        }
+
+        const float3x3 Basis = SubstrateGetBSDFSharedBasis(Header, BSDF, Addressing);
+        FAJPrimaryReflectionLobe Candidate = AJMakeSupportedLobe(
+            BSDF, Basis, ClosureIndex, V);
+        if (!Candidate.bEligible)
+        {
+            continue;
+        }
+
+        TotalWeight += Candidate.SelectionWeight;
+        if (RandSequence.Get1D() * TotalWeight < Candidate.SelectionWeight)
+        {
+            Selected = Candidate;
+        }
+    }
+    Selected.bMaterialMultiClosure = bMultiClosure;
+    // Do not silently discard a second unsupported top reflection lobe.
+    // A mixture containing one requires a truthful complex fallback.
+    if (bHasUnsupportedTopClosure)
+    {
+        Selected.bEligible = false;
+    }
+#else
+    // UE's *native* Blendable material-to-Substrate conversion, single lobe.
+    const FScreenSpaceData ScreenSpaceData = GetScreenSpaceDataUint(ScenePixel);
+    const FSubstrateGBufferBSDF Result = SubstrateReadGBufferBSDF(ScreenSpaceData);
+    Selected = AJMakeSupportedLobe(Result.BSDF, Result.BSDFTangentBasis, 0u, V);
+    TotalWeight = Selected.SelectionWeight;
+#endif
+
+    if (Selected.bEligible && TotalWeight > 0.0f)
+    {
+        Selected.SelectionProbability = Selected.SelectionWeight / TotalWeight;
+    }
+    return Selected;
+}
+
+bool AJIsValidGGXReflectionDirection(float3 L, float3 LobeN, float3 PrimaryN)
+{
+    const float Len2 = dot(L, L);
+    return all(IsFinite(L)) && IsFinite(Len2)
+        && abs(Len2 - 1.0f) < 0.01f
+        && dot(L, LobeN) > 0.0f
+        && dot(L, PrimaryN) > 0.0f;
+}
+
+FAJPrimaryReflectionSample AJGeneratePrimaryReflectionSample(
+    uint2 ScenePixel,
+    FAJPrimarySurfaceDiagnostic Primary,
+    float3 IncidentDirection,
+    bool bStochastic,
+    uint SampleFrameIndex)
+{
+    FAJPrimaryReflectionSample Out = (FAJPrimaryReflectionSample)0;
+    const float3 IdealDirection = normalize(reflect(IncidentDirection, Primary.WorldNormal));
+
+    if (!bStochastic)
+    {
+        // Preserve the exact Week 3A/3B primary direction in A/B mode.
+        Out.bValid = all(IsFinite(IdealDirection));
+        Out.SamplingClass = AJ_SAMPLE_CLASS_MIRROR;
+        Out.Direction = IdealDirection;
+        Out.DirectionalPDF = 1.0f; // Discrete/delta mass, not a sr^-1 density.
+        Out.SelectionProbability = 1.0f;
+        Out.Roughness = Primary.Roughness;
+        return Out;
+    }
+
+    const uint PositionSeed = StrongIntegerHash(
+        ScenePixel.x ^ (ScenePixel.y * 0x9e3779b9u));
+    FRandomSequence RandSequence = RandomSequenceCreate(PositionSeed, SampleFrameIndex);
+    const float3 V = -IncidentDirection;
+    const FAJPrimaryReflectionLobe Lobe = AJSelectPrimaryReflectionLobe(
+        ScenePixel, V, RandSequence);
+
+    Out.bMaterialMultiClosure = Lobe.bMaterialMultiClosure;
+    if (!Lobe.bEligible)
+    {
+        // Unsupported/special/no-reflective-top-lobe fallback is explicit.
+        // A mirror ray is a conservative geometric diagnostic, NOT an
+        // approximation of the complete material's scattering function.
+        Out.SamplingClass = AJ_SAMPLE_CLASS_COMPLEX_FALLBACK;
+        Out.Direction = IdealDirection;
+        Out.DirectionalPDF = 1.0f; // Discrete fallback mass.
+        Out.SelectionProbability = 1.0f;
+        Out.Roughness = Primary.Roughness;
+        Out.bValid = AJIsValidGGXReflectionDirection(
+            IdealDirection, Primary.WorldNormal, Primary.WorldNormal);
+        return Out;
+    }
+
+    Out.ClosureIndex = Lobe.ClosureIndex;
+    Out.SelectionProbability = Lobe.SelectionProbability;
+    Out.Roughness = Lobe.Roughness;
+    Out.Anisotropy = Lobe.Anisotropy;
+    const float3 N = Lobe.TangentBasis[2];
+
+    // Native Substrate minimum GGX roughness is 0.02. Below that limit
+    // we represent the specular event as a delta/mirror sample.
+    if (Lobe.Roughness <= SUBSTRATE_MIN_GGX_ROUGHNESS)
+    {
+        Out.SamplingClass = AJ_SAMPLE_CLASS_MIRROR;
+        Out.Direction = normalize(reflect(IncidentDirection, N));
+        Out.DirectionalPDF = 1.0f; // Discrete probability mass.
+        Out.bValid = Out.SelectionProbability > 0.0f
+            && AJIsValidGGXReflectionDirection(Out.Direction, N, Primary.WorldNormal);
+        return Out;
+    }
+
+    const float SafeRoughness = MakeRoughnessSafe(
+        Lobe.Roughness, SUBSTRATE_MIN_GGX_ROUGHNESS);
+    const float Alpha = Square(SafeRoughness);
+    float2 AlphaXY = float2(Alpha, Alpha);
+    const bool bAnisotropic = abs(Lobe.Anisotropy) > 1.0e-4f;
+    if (bAnisotropic)
+    {
+        GetAnisotropicRoughness(Alpha, Lobe.Anisotropy, AlphaXY.x, AlphaXY.y);
+    }
+
+    // UE's bounded VNDF visible-normal sampling from MonteCarlo.ush.
+    const float3 TangentV = mul(Lobe.TangentBasis, V);
+    if (TangentV.z <= 1.0e-4f)
+    {
+        return Out;
+    }
+    const float4 GGXSample = ImportanceSampleVisibleGGX(
+        RandSequence.Get2D(), AlphaXY, TangentV);
+    const float3 WorldH = normalize(mul(GGXSample.xyz, Lobe.TangentBasis));
+    const float VoH = dot(V, WorldH);
+    if (!all(IsFinite(WorldH)) || VoH <= 1.0e-6f)
+    {
+        return Out;
+    }
+
+    const float3 L = normalize(reflect(IncidentDirection, WorldH));
+    const float DirectionPDF = RayPDFToReflectionRayPDF(VoH, GGXSample.w);
+    const float CombinedPDF = Lobe.SelectionProbability * DirectionPDF;
+
+    Out.SamplingClass = bAnisotropic
+        ? AJ_SAMPLE_CLASS_GGX_ANISOTROPIC : AJ_SAMPLE_CLASS_GGX_ISOTROPIC;
+    Out.Direction = L;
+    Out.DirectionalPDF = DirectionPDF;
+    Out.bValid = IsFinite(DirectionPDF) && IsFinite(CombinedPDF)
+        && CombinedPDF > 0.0f && Out.SelectionProbability > 0.0f
+        && AJIsValidGGXReflectionDirection(L, N, Primary.WorldNormal);
+    return Out;
+}
+
+uint AJPackPrimaryReflectionSampleFlags(FAJPrimaryReflectionSample Sample)
+{
+    if (!Sample.bValid)
+    {
+        return 0u;
+    }
+    return AJ_SAMPLE_FLAG_VALID
+        | ((Sample.ClosureIndex & 15u) << AJ_SAMPLE_FLAG_CLOSURE_SHIFT)
+        | ((Sample.SamplingClass & 7u) << AJ_SAMPLE_FLAG_CLASS_SHIFT)
+        | (Sample.bMaterialMultiClosure ? AJ_SAMPLE_FLAG_MULTI_CLOSURE : 0u)
+        | (Sample.SamplingClass == AJ_SAMPLE_CLASS_COMPLEX_FALLBACK
+            ? AJ_SAMPLE_FLAG_COMPLEX_FALLBACK : 0u);
+}
+#endif // AJ_ENABLE_PRIMARY_REFLECTION_SAMPLING

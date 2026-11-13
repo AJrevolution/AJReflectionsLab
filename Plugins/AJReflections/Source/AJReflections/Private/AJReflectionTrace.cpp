@@ -18,7 +18,7 @@ namespace
     TAutoConsoleVariable<int32> CVarAJReflectionsEnable(
         TEXT("r.AJReflections.Enable"),
         1,
-        TEXT("Enable AJReflections hardware ray tracing for trace debug modes 8-10.\n")
+        TEXT("Enable AJReflections hardware ray tracing for debug modes 8-10 and 13-15.\n")        
         TEXT("0: Skip tracing  1: Enable tracing when supported\n"),
         ECVF_RenderThreadSafe);
 
@@ -26,6 +26,18 @@ namespace
         TEXT("r.AJReflections.MaxTraceDistance"),
         20000.0f,
         TEXT("Maximum AJ reflection ray TMax, in Unreal world units.\n"),
+        ECVF_RenderThreadSafe);
+
+    TAutoConsoleVariable<int32> CVarAJReflectionsStochasticSampling(
+        TEXT("r.AJReflections.StochasticSampling"),
+        1,
+        TEXT("0: Week 3A deterministic mirror ray. 1: Substrate-aware one-ray GGX sampling.\n"),
+        ECVF_RenderThreadSafe);
+
+    TAutoConsoleVariable<int32> CVarAJReflectionsSampleFrameOverride(
+        TEXT("r.AJReflections.SampleFrameOverride"),
+        -1,
+        TEXT("-1: View.StateFrameIndex. >=0: fixed shader sample-frame index for reproducible diagnostics.\n"),
         ECVF_RenderThreadSafe);
 }
 
@@ -63,12 +75,16 @@ public:
         SHADER_PARAMETER(FIntPoint, OutputSize)
         SHADER_PARAMETER(FIntPoint, ViewRectMin)
         SHADER_PARAMETER(float, MaxTraceDistance)
+        SHADER_PARAMETER(int32, StochasticSampling)
+        SHADER_PARAMETER(int32, SampleFrameOverride)
         SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
         SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureShaderParameters, SceneTextures)
         SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
         SHADER_PARAMETER_RDG_BUFFER_SRV(RaytracingAccelerationStructure, TLAS)
         SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, TraceData)
         SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, TraceFlags)
+        SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SampleData)
+        SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, SampleFlags)
     END_SHADER_PARAMETER_STRUCT()
 
     static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -130,16 +146,27 @@ FAJReflectionTraceOutputs AddAJReflectionTracePass(
     Outputs.TraceData = GraphBuilder.CreateTexture(TraceDataDesc, TEXT("AJReflections.TraceData"));
     Outputs.TraceFlags = GraphBuilder.CreateTexture(TraceFlagsDesc, TEXT("AJReflections.TraceFlags"));
 
+    // PDF needs FP32: narrow GGX lobes can produce values well above the
+    // maximum finite FP16 value. Neither texture is persistent/extracted.
+    Outputs.SampleData = GraphBuilder.CreateTexture(
+        TraceDataDesc, TEXT("AJReflections.SampleData"));
+    Outputs.SampleFlags = GraphBuilder.CreateTexture(
+        TraceFlagsDesc, TEXT("AJReflections.SampleFlags"));
+
     auto* PassParameters = GraphBuilder.AllocParameters<FAJReflectionTraceCS::FParameters>();
     PassParameters->OutputSize = ViewSize;
     PassParameters->ViewRectMin = SceneColorViewRect.Min;
     PassParameters->MaxTraceDistance = GetAJReflectionMaxTraceDistance_RenderThread();
+    PassParameters->StochasticSampling = CVarAJReflectionsStochasticSampling.GetValueOnRenderThread() != 0 ? 1 : 0;
+    PassParameters->SampleFrameOverride = FMath::Max(CVarAJReflectionsSampleFrameOverride.GetValueOnRenderThread(), -1);
     PassParameters->View = View.ViewUniformBuffer;
     PassParameters->SceneTextures = SceneTextures;
     PassParameters->Substrate = View.GetSubstrateGlobalUniformBuffer();
     PassParameters->TLAS = TLAS;
     PassParameters->TraceData = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.TraceData));
     PassParameters->TraceFlags = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.TraceFlags));
+    PassParameters->SampleData = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.SampleData));
+    PassParameters->SampleFlags = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.SampleFlags));
 
     const TShaderMapRef<FAJReflectionTraceCS> ComputeShader(
         GetGlobalShaderMap(View.GetShaderPlatform()));

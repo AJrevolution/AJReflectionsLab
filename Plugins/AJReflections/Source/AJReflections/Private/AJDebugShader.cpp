@@ -31,7 +31,10 @@ namespace
         TEXT("9: Hardware reflection hit distance\n")
         TEXT("10: Hardware reflection direction\n")
         TEXT("11: Substrate stored closure count\n")
-        TEXT("12: Primary/top Substrate closure F0\n"),
+        TEXT("12: Primary/top Substrate closure F0\n")
+        TEXT("13: Reflection sampling class and closure index\n")
+        TEXT("14: Selected reflection-lobe roughness\n")
+        TEXT("15: Combined sampling PDF (display mapping)\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(
@@ -89,6 +92,8 @@ public:
 
         SHADER_PARAMETER_RDG_TEXTURE(Texture2D, TraceDataTexture)
         SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, TraceFlagsTexture)
+        SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SampleDataTexture)
+        SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, SampleFlagsTexture)
 
         SHADER_PARAMETER_RDG_TEXTURE_UAV(
             RWTexture2D<float4>,
@@ -175,6 +180,8 @@ FScreenPassTexture AddAJDebugPass(
     const bool bTraceAvailable = TraceOutputs != nullptr && TraceOutputs->IsValid();
     PassParameters->TraceDataTexture = bTraceAvailable ? TraceOutputs->TraceData : nullptr;
     PassParameters->TraceFlagsTexture = bTraceAvailable ? TraceOutputs->TraceFlags : nullptr;
+    PassParameters->SampleDataTexture = bTraceAvailable ? TraceOutputs->SampleData : nullptr;
+    PassParameters->SampleFlagsTexture = bTraceAvailable ? TraceOutputs->SampleFlags : nullptr;
 
     PassParameters->OutputTexture =
         GraphBuilder.CreateUAV(

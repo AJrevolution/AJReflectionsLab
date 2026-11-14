@@ -1,0 +1,55 @@
+// AJReflections Week 4A: independent primary sampling for the material RayGen.
+// The same Week 3C selected-lobe helper produces this ray direction. No inline ray query.
+#include "/Engine/Private/Common.ush"
+#define SUBSTRATE_SSS_MATERIAL_OVERRIDE 0
+#define SUBSTRATE_SSS_TRANSMISSION 0
+#define SUBSTRATE_COMPLEXSPECIALPATH 1
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "/Engine/Private/PositionReconstructionCommon.ush"
+#define AJ_ENABLE_PRIMARY_REFLECTION_SAMPLING 1
+#include "/AJReflections/Private/AJSubstrateMaterial.ush"
+
+int2 OutputSize;
+int2 ViewRectMin;
+int StochasticSampling;
+int SampleFrameOverride;
+RWTexture2D<float4> PrimaryDirection;
+RWTexture2D<float4> PrimarySurface;
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint2 LocalPixel = DispatchThreadId.xy;
+    if (any(LocalPixel >= uint2(OutputSize)))
+    {
+        return;
+    }
+
+    // RGB = unit direction, A = valid primary *and* valid sample.
+    PrimaryDirection[LocalPixel] = float4(0, 0, 0, 0);
+    PrimarySurface[LocalPixel] = float4(0, 0, 0, 0);
+
+    const uint2 ScenePixel = LocalPixel + uint2(ViewRectMin);
+    const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ScenePixel, 0)).r;
+    if (DeviceZ <= 0.0f)
+    {
+        return;
+    }
+
+    const FAJPrimarySurfaceDiagnostic Primary = AJReadPrimarySurface(ScenePixel);
+    if (!Primary.bValid || !all(IsFinite(Primary.WorldNormal)) || !IsFinite(Primary.Roughness))
+    {
+        return;
+    }
+
+    const float3 SurfacePosition = ReconstructTranslatedWorldPositionFromDeviceZ(ScenePixel, DeviceZ);
+    const float3 IncidentDirection = normalize(SurfacePosition - View.TranslatedWorldCameraOrigin);
+    const uint FrameIndex = SampleFrameOverride >= 0 ? (uint)SampleFrameOverride : View.StateFrameIndex;
+    const FAJPrimaryReflectionSample Sample = AJGeneratePrimaryReflectionSample(
+        ScenePixel, Primary, IncidentDirection, StochasticSampling != 0, FrameIndex);
+    if (Sample.bValid && all(IsFinite(Sample.Direction)))
+    {
+        PrimarySurface[LocalPixel] = float4(Primary.WorldNormal, 1.0f);
+        PrimaryDirection[LocalPixel] = float4(Sample.Direction, 1.0f);
+    }
+}

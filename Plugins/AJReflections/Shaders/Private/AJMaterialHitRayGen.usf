@@ -1,0 +1,142 @@
+// AJReflections Week 4A: native programmable material hit proof.
+// MaterialCHS/AHS and FMaterialClosestHitPayload are Unreal's, not AJ's.
+// PrimaryDirection is generated independently in compute using Week 3C sampler.
+#include "/Engine/Private/Common.ush"
+#define SUBSTRATE_SSS_MATERIAL_OVERRIDE 0
+#define SUBSTRATE_SSS_TRANSMISSION 0
+#define SUBSTRATE_COMPLEXSPECIALPATH 1
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "/Engine/Private/PositionReconstructionCommon.ush"
+#include "/Engine/Private/RayTracing/RayTracingCommon.ush"
+
+int2 OutputSize;
+int2 ViewRectMin;
+float MaxTraceDistance;
+RaytracingAccelerationStructure TLAS;
+Texture2D<float4> PrimaryDirection;
+Texture2D<float4> PrimarySurface;
+RWTexture2D<float4> MaterialHitData0;
+RWTexture2D<float4> MaterialHitData1;
+RWTexture2D<uint> MaterialHitFlags;
+
+// Flags: bit0 primary+sample valid, bit1 material hit, bit2 native material
+// payload valid, bits3..5 complexity (0 unknown,1 simple,2 single,
+// 3 complex,4 special,5 other), bit6 packed Adaptive Substrate payload.
+#define AJ_HIT_PRIMARY 1u
+#define AJ_HIT_COMMITTED 2u
+#define AJ_HIT_PAYLOAD 4u
+#define AJ_HIT_ADAPTIVE 64u
+
+RAY_TRACING_ENTRY_RAYGEN(MainRGS)
+{
+    const uint2 LocalPixel = DispatchRaysIndex().xy;
+    if (any(LocalPixel >= uint2(OutputSize)))
+    {
+        return;
+    }
+
+    MaterialHitData0[LocalPixel] = float4(0, 0, 0, 0);
+    MaterialHitData1[LocalPixel] = float4(0, 0, 0, 0);
+    MaterialHitFlags[LocalPixel] = 0u;
+
+    const float4 Sample = PrimaryDirection.Load(int3(LocalPixel, 0));
+    if (Sample.w <= 0.0f || !all(IsFinite(Sample.xyz)))
+    {
+        return;
+    }
+
+    uint Flags = AJ_HIT_PRIMARY;
+    MaterialHitFlags[LocalPixel] = Flags;
+    if (MaxTraceDistance <= 0.0f)
+    {
+        return;
+    }
+
+    const uint2 ScenePixel = LocalPixel + uint2(ViewRectMin);
+    const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ScenePixel, 0)).r;
+    if (DeviceZ <= 0.0f)
+    {
+        return;
+    }
+    const float4 Primary = PrimarySurface.Load(int3(LocalPixel, 0));
+    if (Primary.w <= 0.0f)
+    {
+        return;
+    }
+
+    FRayDesc Ray;
+    Ray.Origin = ReconstructTranslatedWorldPositionFromDeviceZ(ScenePixel, DeviceZ);
+    Ray.Direction = Sample.xyz;
+    Ray.TMin = 0.0f;
+    Ray.TMax = MaxTraceDistance;
+    // The established UE camera-relative bias; never change TLAS space here.
+    ApplyCameraRelativeDepthBias(Ray, ScenePixel, DeviceZ, Primary.xyz, 0.0f);
+
+    FRayCone RayCone = (FRayCone)0;
+    // No force-opaque flag: the native material any-hit shader is allowed to
+    // evaluate masked geometry. Translucent geometry is ignored by this packet.
+    FMaterialClosestHitPayload Hit = TraceMaterialRay(
+        TLAS, RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+        RAY_TRACING_MASK_OPAQUE_REFLECTION, Ray, RayCone,
+        false /* skylight in CHS */, true /* ignore translucent */,
+        false /* secondary ray, not a camera ray */);
+    if (!Hit.IsHit())
+    {
+        return;
+    }
+    Flags |= AJ_HIT_COMMITTED;
+
+#if SUBSTRATE_GBUFFER_FORMAT == 1
+    // This is the native OFF-SCREEN MATERIAL payload, not the primary
+    // surface's Substrate view texture. RayGen uses the RT payload container.
+    const FSubstrateTopLayerData Top = SubstrateUnpackTopLayerData(
+        Hit.SubstrateData.PackedTopLayerData);
+    FSubstrateAddressing Addressing = GetSubstratePixelDataByteOffset(0, 0, 0);
+    FSubstratePixelHeader Header = UnpackSubstrateHeaderIn(
+        Hit.SubstrateData, Addressing, Hit.SubstrateData);
+    if (IsSubstrateMaterial(Top) && Header.ClosureCount > 0u)
+    {
+        Flags |= AJ_HIT_PAYLOAD | AJ_HIT_ADAPTIVE;
+        uint Complexity = 5u;
+        if (Header.IsSimpleMaterial())       Complexity = 1u;
+        else if (Header.IsSingleMaterial()) Complexity = 2u;
+        else if (Header.IsComplexSpecialMaterial()) Complexity = 4u;
+        else if (Header.IsComplexMaterial()) Complexity = 3u;
+        Flags |= (Complexity & 7u) << 3u;
+
+        float3 TopF0 = 0.0f;
+        float TopRoughness = Top.Roughness;
+        bool bFoundTop = false;
+        [loop]
+        for (uint I = 0u;
+             I < min(Header.ClosureCount, (uint)SUBSTRATE_MAX_CLOSURE_COUNT);
+             ++I)
+        {
+            const FSubstrateBSDF BSDF = UnpackSubstrateBSDFIn(
+                Hit.SubstrateData, Addressing, Header);
+            if (!bFoundTop && BSDF_GETISTOPLAYER(BSDF) != 0u)
+            {
+                TopF0 = SubstrateGetBSDFSpecularF0(BSDF);
+                TopRoughness = SubstrateGetBSDFRoughness(BSDF);
+                bFoundTop = true;
+            }
+        }
+        // F0 and roughness are diagnostics of one native top closure; the
+        // retained count does NOT imply full multi-closure lighting parity.
+        if (bFoundTop)
+        {
+            MaterialHitData0[LocalPixel] = float4(TopF0, TopRoughness);
+        }
+        MaterialHitData1[LocalPixel] = float4(Hit.WorldNormal, Header.ClosureCount);
+    }
+#else
+    // Blendable's UE material payload is representable as a single closure.
+    if (Hit.ShadingModelID != SHADINGMODELID_UNLIT)
+    {
+        Flags |= AJ_HIT_PAYLOAD | (2u << 3u);
+        MaterialHitData0[LocalPixel] = float4(Hit.SpecularColor, Hit.Roughness);
+        MaterialHitData1[LocalPixel] = float4(Hit.WorldNormal, 1.0f);
+    }
+#endif
+    MaterialHitFlags[LocalPixel] = Flags;
+}

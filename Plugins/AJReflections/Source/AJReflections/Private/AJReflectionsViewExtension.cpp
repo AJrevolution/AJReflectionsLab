@@ -87,6 +87,14 @@ FAJReflectionsViewExtension::PostProcessAfterDOF_RenderThread(
             GraphBuilder);
     }
 
+    // Modes 16..19 are rendered into working SceneColor by the permanent
+    // opaque reflection integration. Never overwrite them after DOF.
+    const int32 DebugMode = GetAJDebugMode_AnyThread();
+    if (DebugMode >= 16 && DebugMode <= 19)
+    {
+        return Inputs.ReturnUntouchedSceneColorForPostProcessing(GraphBuilder);
+    }
+
     // This project targets the deferred renderer. The shader below consumes
     // FSceneTextureUniformParameters via SceneTexturesStruct.
     if (!Inputs.SceneTextures.SceneTextures)
@@ -96,7 +104,6 @@ FAJReflectionsViewExtension::PostProcessAfterDOF_RenderThread(
     }
 
     FAJReflectionTraceOutputs TraceOutputs;
-    const int32 DebugMode = GetAJDebugMode_AnyThread();
 
     const bool bNeedsTraceDiagnostics = (DebugMode >= 8 && DebugMode <= 10)
         || (DebugMode >= 13 && DebugMode <= 15);

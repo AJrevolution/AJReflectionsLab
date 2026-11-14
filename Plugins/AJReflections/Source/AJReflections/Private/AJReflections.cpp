@@ -2,6 +2,9 @@
 
 #include "AJReflections.h"
 #include "AJReflectionsViewExtension.h"
+#include "AJRendererExtension.h"
+#include "OpaqueReflectionExtension.h"
+#include "RenderingThread.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 #include "ShaderCore.h"
@@ -16,6 +19,7 @@ namespace
 		ESPMode::ThreadSafe> GAJReflectionsViewExtension;
 
 	FDelegateHandle GAJPostEngineInitHandle;
+	TSharedPtr<FAJRendererExtension, ESPMode::ThreadSafe> GAJRendererExtension;
 }
 
 void FAJReflectionsModule::StartupModule()
@@ -39,6 +43,10 @@ void FAJReflectionsModule::StartupModule()
 		GAJReflectionsViewExtension =
 			FSceneViewExtensions::NewExtension<
 			FAJReflectionsViewExtension>();
+
+		// Generic Renderer registry; never register before OnPostEngineInit.
+		GAJRendererExtension = MakeShared<FAJRendererExtension, ESPMode::ThreadSafe>();
+		RegisterOpaqueReflectionExtension(GAJRendererExtension.ToSharedRef());
 	});
 }
 
@@ -48,6 +56,14 @@ void FAJReflectionsModule::ShutdownModule()
 	{
 		FCoreDelegates::OnPostEngineInit.Remove(
 			GAJPostEngineInitHandle);
+	}
+
+	if (GAJRendererExtension.IsValid())
+	{
+		UnregisterOpaqueReflectionExtension(GAJRendererExtension.Get());
+		// The Renderer may still have RDG work queued on its rendering thread.
+		FlushRenderingCommands();
+		GAJRendererExtension.Reset();
 	}
 
 	GAJReflectionsViewExtension.Reset();

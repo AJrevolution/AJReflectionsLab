@@ -18,8 +18,8 @@ namespace
     TAutoConsoleVariable<int32> CVarAJReflectionsEnable(
         TEXT("r.AJReflections.Enable"),
         1,
-        TEXT("Enable AJReflections hardware ray tracing for debug modes 8-10 and 13-15.\n")        
-        TEXT("0: Skip tracing  1: Enable tracing when supported\n"),
+        TEXT("Enable AJReflections permanent opaque reflection integration and hardware ray diagnostics.\n")
+        TEXT("0: no AJ permanent ray/material RT demand  1: enable where supported\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsMaxTraceDistance(
@@ -49,6 +49,16 @@ bool IsAJReflectionTracingEnabled_AnyThread()
 float GetAJReflectionMaxTraceDistance_RenderThread()
 {
     return FMath::Max(CVarAJReflectionsMaxTraceDistance.GetValueOnRenderThread(), 0.0f);
+}
+
+bool GetAJReflectionStochasticSampling_RenderThread()
+{
+    return CVarAJReflectionsStochasticSampling.GetValueOnRenderThread() != 0;
+}
+
+int32 GetAJReflectionSampleFrameOverride_RenderThread()
+{
+    return FMath::Max(CVarAJReflectionsSampleFrameOverride.GetValueOnRenderThread(), -1);
 }
 
 bool CanAJReflectionTrace_RenderThread(const FSceneView& View)

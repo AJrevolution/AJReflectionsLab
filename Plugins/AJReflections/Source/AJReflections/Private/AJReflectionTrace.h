@@ -27,6 +27,8 @@ struct FAJReflectionTraceOutputs
 
 bool IsAJReflectionTracingEnabled_AnyThread();
 float GetAJReflectionMaxTraceDistance_RenderThread();
+bool GetAJReflectionStochasticSampling_RenderThread();
+int32 GetAJReflectionSampleFrameOverride_RenderThread();
 bool CanAJReflectionTrace_RenderThread(const FSceneView& View);
 
 FAJReflectionTraceOutputs AddAJReflectionTracePass(

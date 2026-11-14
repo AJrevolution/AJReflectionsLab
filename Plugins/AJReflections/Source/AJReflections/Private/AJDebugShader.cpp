@@ -34,7 +34,11 @@ namespace
         TEXT("12: Primary/top Substrate closure F0\n")
         TEXT("13: Reflection sampling class and closure index\n")
         TEXT("14: Selected reflection-lobe roughness\n")
-        TEXT("15: Combined sampling PDF (display mapping)\n"),
+        TEXT("15: Combined sampling PDF (display mapping)\n")
+        TEXT("16: Secondary-hit native material validity / complexity\n")
+        TEXT("17: Secondary-hit top closure F0\n")
+        TEXT("18: Secondary-hit top closure roughness\n")
+        TEXT("19: Secondary-hit native shading normal\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(

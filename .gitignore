@@ -73,3 +73,15 @@ Plugins/**/Intermediate/*
 # Cache files for the editor to use
 DerivedDataCache/*
 changes.diff
+AJReflectionsLab.uproject - Shortcut.lnk
+Content/AJReflections/Diagnostics/Substrate/L_AJ_Week3B_Verification.umap
+Content/AJReflections/Diagnostics/Substrate/L_AJ_Week3C_Verification.umap
+Content/AJReflections/Diagnostics/Substrate/M_AJ_Substrate_ComplexFeature.uasset
+Content/AJReflections/Diagnostics/Substrate/M_AJ_Substrate_LayeredTwoSlabs.uasset
+Content/AJReflections/Diagnostics/Substrate/M_AJ_Substrate_SingleDielectric.uasset
+Content/AJReflections/Diagnostics/Substrate/M_AJ_Substrate_SingleMetalF0.uasset
+Content/AJReflections/Diagnostics/Substrate/Week3C/M_AJ_3C_Anisotropic_R030_A080.uasset
+Content/AJReflections/Diagnostics/Substrate/Week3C/M_AJ_3C_Mirror_R000.uasset
+Content/AJReflections/Diagnostics/Substrate/Week3C/M_AJ_3C_Roughness_R005.uasset
+Content/AJReflections/Diagnostics/Substrate/Week3C/M_AJ_3C_Roughness_R030.uasset
+Content/AJReflections/Diagnostics/Substrate/Week3C/M_AJ_3C_Roughness_R080.uasset

@@ -1,0 +1,48 @@
+// AJReflections Week 4A: opaque-stage material-hit diagnostics.
+// Pixel-shader render-target load preserves existing pre-exposed SceneColor
+// outside the diagnostic viewport; no scene color copy or post-process cache.
+#include "/Engine/Private/Common.ush"
+
+int2 ViewRectMin;
+int DebugMode;
+Texture2D<float4> MaterialHitData0;
+Texture2D<float4> MaterialHitData1;
+Texture2D<uint> MaterialHitFlags;
+
+float4 MainPS(float4 SvPosition : SV_POSITION) : SV_Target0
+{
+    const uint2 LocalPixel = uint2(int2(SvPosition.xy) - ViewRectMin);
+    const uint Flags = MaterialHitFlags.Load(int3(LocalPixel, 0));
+    const bool bHit = (Flags & 2u) != 0u;
+    const bool bValid = (Flags & 4u) != 0u;
+    const float4 Data0 = MaterialHitData0.Load(int3(LocalPixel, 0));
+    const float4 Data1 = MaterialHitData1.Load(int3(LocalPixel, 0));
+    float3 Color = 0.0f;
+
+    if (DebugMode == 16)
+    {
+        // Green = native payload, yellow = geometry hit without native
+        // material payload, blue = material fallback/unknown complexity.
+        // Complexity 1..4 can be inspected as slight brightness increments.
+        const uint Complexity = (Flags >> 3u) & 7u;
+        if (bValid)
+        {
+            Color = float3(0.0f, 0.6f + 0.08f * float(min(Complexity, 4u)),
+                (Flags & 64u) != 0u ? 0.0f : 0.4f);
+        }
+        else if (bHit)
+        {
+            Color = float3(1.0f, 0.8f, 0.0f);
+        }
+    }
+    else if (bValid)
+    {
+        if (DebugMode == 17) Color = Data0.xyz;               // F0, not radiance
+        if (DebugMode == 18) Color = Data0.www;               // selected top roughness
+        if (DebugMode == 19) Color = Data1.xyz * 0.5f + 0.5f;// secondary shading normal
+    }
+
+    // Diagnostic RGB is semantic display color, not scene-linear radiance.
+    // Alpha=1 to match previous AJ debug outputs.
+    return float4(Color, 1.0f);
+}

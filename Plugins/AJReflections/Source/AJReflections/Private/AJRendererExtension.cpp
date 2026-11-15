@@ -45,7 +45,7 @@ void FAJRendererExtension::RenderOpaqueReflections(
     // the programmable material pass; inline diagnostic backend is untouched.
     const FAJMaterialHitOutputs Outputs = AddAJMaterialHitPass(Context);
     const int32 DebugMode = GetAJDebugMode_AnyThread();
-    if (DebugMode >= 16 && DebugMode <= 19)
+    if (DebugMode >= 16 && DebugMode <= 23)
     {
         AddAJReflectionComposePass(Context, Outputs, DebugMode);
     }

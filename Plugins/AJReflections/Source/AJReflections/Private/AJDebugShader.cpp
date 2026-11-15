@@ -38,7 +38,11 @@ namespace
         TEXT("16: Secondary-hit native material validity / complexity\n")
         TEXT("17: Secondary-hit top closure F0\n")
         TEXT("18: Secondary-hit top closure roughness\n")
-        TEXT("19: Secondary-hit native shading normal\n"),
+        TEXT("19: Secondary-hit native shading normal\n")
+        TEXT("20: Final pre-exposed HDR reflection radiance\n")
+        TEXT("21: Secondary material emissive (pre-exposed HDR)\n")
+        TEXT("22: Shadowed secondary directional light (pre-exposed HDR)\n")
+        TEXT("23: Primary selected-closure transport (display mapped)\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(

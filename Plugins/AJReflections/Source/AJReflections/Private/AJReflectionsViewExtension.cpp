@@ -87,10 +87,10 @@ FAJReflectionsViewExtension::PostProcessAfterDOF_RenderThread(
             GraphBuilder);
     }
 
-    // Modes 16..19 are rendered into working SceneColor by the permanent
-    // opaque reflection integration. Never overwrite them after DOF.
+    // Modes 16..23 belong to the permanent opaque reflection stage.
+    // Do not re-render them through the AfterDOF diagnostic callback.
     const int32 DebugMode = GetAJDebugMode_AnyThread();
-    if (DebugMode >= 16 && DebugMode <= 19)
+    if (DebugMode >= 16 && DebugMode <= 23)
     {
         return Inputs.ReturnUntouchedSceneColorForPostProcessing(GraphBuilder);
     }

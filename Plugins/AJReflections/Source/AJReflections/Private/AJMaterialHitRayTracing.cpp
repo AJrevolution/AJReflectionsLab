@@ -12,6 +12,7 @@
 #include "SceneView.h"
 #include "ShaderCompilerCore.h"
 #include "ShaderParameterStruct.h"
+#include "RayTracing/RayTracingHitLightingParameters.h"
 #include "Substrate/SubstrateViewParameters.h"
 
 #if RHI_RAYTRACING
@@ -53,6 +54,8 @@ namespace
             SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, PrimaryDirection)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, PrimarySurface)
+            SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, PrimaryTransport)
+            SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, PrimarySamplingClass)
         END_SHADER_PARAMETER_STRUCT()
 
         static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -80,12 +83,19 @@ namespace
             SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureShaderParameters, SceneTextures)
             SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneUniformParameters, Scene)
             SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
+            SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FRayTracingLightGrid, LightGrid)
             SHADER_PARAMETER_RDG_BUFFER_SRV(RaytracingAccelerationStructure, TLAS)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, PrimaryDirection)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, PrimarySurface)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D, PrimaryTransport)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, PrimarySamplingClass)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, MaterialHitData0)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, MaterialHitData1)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, MaterialHitFlags)
+            SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ReflectionRadiance)
+            SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SecondaryEmissive)
+            SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SecondaryDirect)
+            SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, ReflectionRadianceFlags)
         END_SHADER_PARAMETER_STRUCT()
 
         static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -131,7 +141,8 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
     if (!IsAJMaterialHitBackendEnabled_AnyThread()
         || !Context.MaterialDispatch.IsValid()
         || Context.TLAS == nullptr || Context.Substrate == nullptr
-        || Context.Scene == nullptr || !Context.SceneTextures.SceneTextures
+        || Context.Scene == nullptr || Context.LightGrid == nullptr
+        || !Context.SceneTextures.SceneTextures
         || Extent.X <= 0 || Extent.Y <= 0)
     {
         return Outputs;
@@ -150,6 +161,12 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
         FloatDesc, TEXT("AJReflections.MaterialHitDirection"));
     FRDGTextureRef PrimarySurface = GraphBuilder.CreateTexture(
         FloatDesc, TEXT("AJReflections.MaterialHitPrimarySurface"));
+    Outputs.PrimaryTransport = GraphBuilder.CreateTexture(
+        FloatDesc, TEXT("AJReflections.PrimaryTransport"));
+    // One graph-local classification channel to signal complex primary fallback
+    // without altering Week 4A's Direction/Surface output ABI.
+    FRDGTextureRef PrimarySamplingClass = GraphBuilder.CreateTexture(
+        FlagsDesc, TEXT("AJReflections.PrimarySamplingClass"));
 
     auto* SampleParameters = GraphBuilder.AllocParameters<FAJPrimaryReflectionSampleCS::FParameters>();
     SampleParameters->OutputSize = Extent;
@@ -161,6 +178,8 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
     SampleParameters->Substrate = Context.Substrate;
     SampleParameters->PrimaryDirection = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(PrimaryDirection));
     SampleParameters->PrimarySurface = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(PrimarySurface));
+    SampleParameters->PrimaryTransport = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.PrimaryTransport));
+    SampleParameters->PrimarySamplingClass = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(PrimarySamplingClass));
 
     const TShaderMapRef<FAJPrimaryReflectionSampleCS> SamplingShader(
         GetGlobalShaderMap(Context.View.GetShaderPlatform()));
@@ -172,6 +191,10 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
     Outputs.MaterialHitData0 = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.MaterialHitData0"));
     Outputs.MaterialHitData1 = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.MaterialHitData1"));
     Outputs.MaterialHitFlags = GraphBuilder.CreateTexture(FlagsDesc, TEXT("AJReflections.MaterialHitFlags"));
+    Outputs.ReflectionRadiance = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.ReflectionRadiance"));
+    Outputs.SecondaryEmissive = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.SecondaryEmissive"));
+    Outputs.SecondaryDirect = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.SecondaryDirect"));
+    Outputs.ReflectionRadianceFlags = GraphBuilder.CreateTexture(FlagsDesc, TEXT("AJReflections.ReflectionRadianceFlags"));
 
     auto* Parameters = GraphBuilder.AllocParameters<FAJMaterialHitRGS::FParameters>();
     Parameters->OutputSize = Extent;
@@ -181,12 +204,19 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
     Parameters->SceneTextures = Context.SceneTextures;
     Parameters->Scene = Context.Scene;
     Parameters->Substrate = Context.Substrate;
+    Parameters->LightGrid = Context.LightGrid;
     Parameters->TLAS = Context.TLAS;
     Parameters->PrimaryDirection = PrimaryDirection;
     Parameters->PrimarySurface = PrimarySurface;
+    Parameters->PrimaryTransport = Outputs.PrimaryTransport;
+    Parameters->PrimarySamplingClass = PrimarySamplingClass;
     Parameters->MaterialHitData0 = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.MaterialHitData0));
     Parameters->MaterialHitData1 = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.MaterialHitData1));
     Parameters->MaterialHitFlags = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.MaterialHitFlags));
+    Parameters->ReflectionRadiance = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.ReflectionRadiance));
+    Parameters->SecondaryEmissive = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.SecondaryEmissive));
+    Parameters->SecondaryDirect = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.SecondaryDirect));
+    Parameters->ReflectionRadianceFlags = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.ReflectionRadianceFlags));
 
     const TShaderMapRef<FAJMaterialHitRGS> RayGenShader(
         GetGlobalShaderMap(Context.View.GetShaderPlatform()));

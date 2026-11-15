@@ -7,6 +7,7 @@
 #include "/Engine/Private/DeferredShadingCommon.ush"
 #include "/Engine/Private/PositionReconstructionCommon.ush"
 #define AJ_ENABLE_PRIMARY_REFLECTION_SAMPLING 1
+#define AJ_ENABLE_PRIMARY_REFLECTION_TRANSPORT 1
 #include "/AJReflections/Private/AJSubstrateMaterial.ush"
 
 int2 OutputSize;
@@ -15,6 +16,8 @@ int StochasticSampling;
 int SampleFrameOverride;
 RWTexture2D<float4> PrimaryDirection;
 RWTexture2D<float4> PrimarySurface;
+RWTexture2D<float4> PrimaryTransport;
+RWTexture2D<uint> PrimarySamplingClass;
 
 [numthreads(8, 8, 1)]
 void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
@@ -28,6 +31,8 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     // RGB = unit direction, A = valid primary *and* valid sample.
     PrimaryDirection[LocalPixel] = float4(0, 0, 0, 0);
     PrimarySurface[LocalPixel] = float4(0, 0, 0, 0);
+    PrimaryTransport[LocalPixel] = 0.0f;
+    PrimarySamplingClass[LocalPixel] = AJ_SAMPLE_CLASS_INVALID;
 
     const uint2 ScenePixel = LocalPixel + uint2(ViewRectMin);
     const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ScenePixel, 0)).r;
@@ -51,5 +56,14 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     {
         PrimarySurface[LocalPixel] = float4(Primary.WorldNormal, 1.0f);
         PrimaryDirection[LocalPixel] = float4(Sample.Direction, 1.0f);
+        PrimarySamplingClass[LocalPixel] = Sample.SamplingClass;
+        // This does not reroll closure selection or change the traced direction.
+        const FAJPrimaryReflectionTransport Transport =
+            AJEvaluatePrimaryReflectionTransport(
+                ScenePixel, IncidentDirection, Sample, StochasticSampling != 0);
+        if (Transport.bValid)
+        {
+            PrimaryTransport[LocalPixel] = float4(Transport.Weight, 1.0f);
+        }
     }
 }

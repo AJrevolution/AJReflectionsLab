@@ -15,6 +15,19 @@ struct FAJMaterialHitOutputs
     FRDGTextureRef MaterialHitData1 = nullptr;
     FRDGTextureRef MaterialHitFlags = nullptr;
 
+    // Week 4B semantic outputs; all remain graph-local, never extracted.
+    FRDGTextureRef PrimaryTransport = nullptr;
+    FRDGTextureRef ReflectionRadiance = nullptr;
+    FRDGTextureRef SecondaryEmissive = nullptr;
+    FRDGTextureRef SecondaryDirect = nullptr;
+    FRDGTextureRef ReflectionRadianceFlags = nullptr;
+
+    bool HasRadiance() const
+    {
+        return PrimaryTransport && ReflectionRadiance && SecondaryEmissive
+            && SecondaryDirect && ReflectionRadianceFlags;
+    }
+
     bool IsValid() const
     {
         return MaterialHitData0 && MaterialHitData1 && MaterialHitFlags;

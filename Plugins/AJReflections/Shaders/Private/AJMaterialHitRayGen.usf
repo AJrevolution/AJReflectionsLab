@@ -8,6 +8,9 @@
 #include "/Engine/Private/DeferredShadingCommon.ush"
 #include "/Engine/Private/PositionReconstructionCommon.ush"
 #include "/Engine/Private/RayTracing/RayTracingCommon.ush"
+#include "/Engine/Private/Substrate/SubstrateEvaluation.ush"
+#include "/Engine/Shared/RayTracingTypes.h"
+#include "/Engine/Shared/LightDefinitions.h"
 
 int2 OutputSize;
 int2 ViewRectMin;
@@ -15,9 +18,15 @@ float MaxTraceDistance;
 RaytracingAccelerationStructure TLAS;
 Texture2D<float4> PrimaryDirection;
 Texture2D<float4> PrimarySurface;
+Texture2D<float4> PrimaryTransport;
+Texture2D<uint> PrimarySamplingClass;
 RWTexture2D<float4> MaterialHitData0;
 RWTexture2D<float4> MaterialHitData1;
 RWTexture2D<uint> MaterialHitFlags;
+RWTexture2D<float4> ReflectionRadiance;
+RWTexture2D<float4> SecondaryEmissive;
+RWTexture2D<float4> SecondaryDirect;
+RWTexture2D<uint> ReflectionRadianceFlags;
 
 // Flags: bit0 primary+sample valid, bit1 material hit, bit2 native material
 // payload valid, bits3..5 complexity (0 unknown,1 simple,2 single,
@@ -26,6 +35,218 @@ RWTexture2D<uint> MaterialHitFlags;
 #define AJ_HIT_COMMITTED 2u
 #define AJ_HIT_PAYLOAD 4u
 #define AJ_HIT_ADAPTIVE 64u
+
+
+// Dedicated Week 4B radiance flags; do not change MaterialHitFlags.
+#define AJ_RAD_PRIMARY_VALID          (1u << 0u)
+#define AJ_RAD_PRIMARY_SUPPORTED      (1u << 1u)
+#define AJ_RAD_SECONDARY_HIT          (1u << 2u)
+#define AJ_RAD_SECONDARY_PAYLOAD      (1u << 3u)
+#define AJ_RAD_EMISSIVE_PRESENT       (1u << 4u)
+#define AJ_RAD_DIRECT_EVALUATED       (1u << 5u)
+#define AJ_RAD_DIRECT_PARTIAL         (1u << 6u)
+#define AJ_RAD_PRIMARY_COMPLEX        (1u << 7u)
+// Bit 8 reserved for future source-correct environment misses (not 4B).
+
+#define AJ_SAMPLE_CLASS_COMPLEX_FALLBACK 4u
+
+struct FAJSecondaryDirectResult
+{
+    float3 Radiance; // Scene-referred; not yet multiplied by View.PreExposure.
+    bool bEvaluated;
+    bool bPartial;
+};
+
+// UE's native material-SBT shadow slot and minimal visibility payload.
+// This keeps material AnyHit/masking behavior; don't force opaque here.
+bool AJIsDirectionalLightVisible(float3 HitPosition, float3 HitNormal,
+                                 float3 LightDirection)
+{
+    FRayDesc ShadowRay;
+    ShadowRay.Origin = HitPosition;
+    ShadowRay.Direction = LightDirection;
+    ShadowRay.TMin = 1.0e-4f;
+    ShadowRay.TMax = 1.0e8f; // Bounded directional-light infinity, in UE units.
+    ApplyPositionBias(ShadowRay, HitNormal, 0.05f);
+    FMinimalPayload Visibility = TraceVisibilityRay(
+        TLAS,
+        RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+        RAY_TRACING_MASK_SHADOW,
+        ShadowRay);
+    return Visibility.IsMiss();
+}
+
+#if SUBSTRATE_GBUFFER_FORMAT == 1
+// The native *secondary RT payload* is the only material input here.
+// Do not access the screen-primary Substrate.MaterialTextureArray.
+bool AJGetSupportedSecondaryBSDF(FMaterialClosestHitPayload Hit,
+                                float3 V, float3 L,
+                                out FSubstrateBSDFContext OutContext)
+{
+    OutContext = (FSubstrateBSDFContext)0;
+    FSubstrateAddressing Addressing = GetSubstratePixelDataByteOffset(0, 0, 0);
+    const FSubstratePixelHeader Header = UnpackSubstrateHeaderIn(
+        Hit.SubstrateData, Addressing, Hit.SubstrateData);
+    // UE's RT payload is often simplified to one closure; refuse to shade a
+    // partially decoded hierarchy as an invented single Slab scattering law.
+    if (Header.ClosureCount != 1u || Header.IsComplexMaterial()
+        || Header.IsComplexSpecialMaterial())
+    {
+        return false;
+    }
+
+    const FSubstrateBSDF BSDF = UnpackSubstrateBSDFIn(
+        Hit.SubstrateData, Addressing, Header);
+    if (BSDF_GETISTOPLAYER(BSDF) == 0u
+        || BSDF_GETTYPE(BSDF) != SUBSTRATE_BSDF_TYPE_SLAB
+        || BSDF_GETHASHAZINESS(BSDF) != 0u
+        || BSDF_GETHASFUZZ(BSDF) != 0u
+        || BSDF_GETHASGLINT(BSDF) != 0u
+        || BSDF_GETHASSPECPROFILE(BSDF) != 0u
+        || BSDF_GETSSSTYPE(BSDF) != SSS_TYPE_NONE
+        || BSDF_GETISTHIN(BSDF) != 0u)
+    {
+        return false;
+    }
+
+    OutContext = SubstrateCreateBSDFContext(Header, BSDF, Addressing, V, L);
+    return dot(OutContext.N, V) > 0.0f
+        && all(IsFinite(OutContext.N));
+}
+#else
+// Blendable is a separate native RT material representation. Restrict this
+// initial evaluator to DefaultLit (not special scattering/shading models).
+bool AJIsSupportedBlendableDirect(FMaterialClosestHitPayload Hit)
+{
+    return Hit.ShadingModelID == SHADINGMODELID_DEFAULT_LIT
+        && all(IsFinite(Hit.SpecularColor))
+        && all(IsFinite(Hit.DiffuseColor))
+        && IsFinite(Hit.Roughness);
+}
+#endif
+
+// Source conventions:
+//  - FRayTracingLightGrid.SceneLights[0..SceneInfiniteLightCount) are sorted
+//    directional lights (RayTracingLighting.cpp::CreateRayTracingLightData).
+//  - LightColor is light scene data with InverseExposureBlend applied by UE,
+//    not an already pre-exposed SceneColor value.
+//  - Direct shading uses UE's native selected hit Slab evaluator and visibility.
+FAJSecondaryDirectResult AJEvaluateSecondaryInfiniteLights(
+    FMaterialClosestHitPayload Hit, FRayDesc Ray)
+{
+    FAJSecondaryDirectResult Out = (FAJSecondaryDirectResult) 0;
+    const float3 V = -Ray.Direction;
+    const float3 HitPosition = Hit.TranslatedWorldPos;
+    const float3 HitNormal = normalize(Hit.WorldNormal);
+    if (!all(IsFinite(HitPosition)) || !all(IsFinite(HitNormal)))
+    {
+        Out.bPartial = true;
+        return Out;
+    }
+
+#if SUBSTRATE_GBUFFER_FORMAT == 1
+    // Probe support against a valid hemispherical test direction. We cannot
+    // assume the stored payload is equal to the authored primary material.
+    FSubstrateBSDFContext InitialContext;
+    if (!AJGetSupportedSecondaryBSDF(Hit, V, HitNormal, InitialContext))
+    {
+        Out.bPartial = true;
+        return Out;
+    }
+#else
+    if (!AJIsSupportedBlendableDirect(Hit))
+    {
+        Out.bPartial = true;
+        return Out;
+    }
+#endif
+
+    // Light count can legitimately be zero: the material response is still
+    // representable and emissive can be used independently.
+    const uint InfiniteCount = min(RaytracingLightGridData.SceneInfiniteLightCount,
+                                   RaytracingLightGridData.SceneLightCount);
+    [loop]
+    for (uint LightIndex = 0u; LightIndex < InfiniteCount; ++LightIndex)
+    {
+        const FRTLightingData Light = RaytracingLightGridData.SceneLights[LightIndex];
+        if (Light.Type != LIGHT_TYPE_DIRECTIONAL)
+        {
+            Out.bPartial = true;
+            continue;
+        }
+        // The bounded first evaluator has no light-function miss-shader path.
+        // Do not silently pretend a directional light function was evaluated.
+        if (Light.LightMissShaderIndex != RAY_TRACING_MISS_SHADER_SLOT_LIGHTING)
+        {
+            Out.bPartial = true;
+            continue;
+        }
+        const float3 L = normalize(Light.Direction);
+        if (!all(IsFinite(L)))
+        {
+            Out.bPartial = true;
+            continue;
+        }
+        const float NoL = dot(HitNormal, L);
+        Out.bEvaluated = true;
+        if (NoL <= 0.0f || !AJIsDirectionalLightVisible(HitPosition, HitNormal, L))
+        {
+            continue;
+        }
+
+        const float2 LightScales = UnpackFloat2FromUInt(Light.DiffuseSpecularScale);
+        float3 ExitantBRDF = 0.0f;
+#if SUBSTRATE_GBUFFER_FORMAT == 1
+        FSubstrateBSDFContext Context;
+        if (!AJGetSupportedSecondaryBSDF(Hit, V, L, Context))
+        {
+            Out.bPartial = true;
+            continue;
+        }
+        const FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings();
+        const FSubstrateEvaluateResult BSDF = SubstrateEvaluateBSDF(Context, Settings);
+        // Integrated values already carry native punctual NoL, energy terms.
+        // LuminanceWeight includes UE's overlying-closure attenuation.
+        ExitantBRDF = LuminanceWeight(Context, Context.BSDF)
+            * (BSDF.IntegratedDiffuseValue * LightScales.x
+             + BSDF.IntegratedSpecularValue * LightScales.y);
+#else
+        // Blendable's actual OFF-SCREEN FMaterialClosestHitPayload properties.
+        // UE's D/Vis/Fresnel and GGX energy helpers are reused; no GBuffer read.
+        const float SafeRoughness = MakeRoughnessSafe(
+            Hit.Roughness, SUBSTRATE_MIN_GGX_ROUGHNESS);
+        const float Alpha2 = Pow4(SafeRoughness);
+        const float NoV = saturate(dot(HitNormal, V));
+        const float3 H = normalize(V + L);
+        const float VoH = saturate(dot(V, H));
+        const float NoH = saturate(dot(HitNormal, H));
+        const FBxDFEnergyTerms Energy = ComputeGGXSpecEnergyTerms(
+            SafeRoughness, NoV, Hit.SpecularColor, float3(1, 1, 1));
+        const float3 Spec = Substrate_D_GGX(SafeRoughness, Alpha2, NoH)
+            * Substrate_Vis_GGX(SafeRoughness, Alpha2, NoV, NoL)
+            * Substrate_F_GGX(Hit.SpecularColor, float3(1, 1, 1), VoH)
+            * ComputeEnergyConservation(Energy);
+        const float3 Diff = Diffuse_Lambert(Hit.DiffuseColor)
+            * ComputeEnergyPreservation(Energy);
+        ExitantBRDF = NoL * (LightScales.x * Diff + LightScales.y * Spec);
+#endif
+        const float3 Direct = ExitantBRDF * Light.LightColor;
+        if (all(IsFinite(Direct)))
+        {
+            Out.Radiance += Direct;
+        }
+        else
+        {
+            Out.bPartial = true;
+        }
+    }
+    if (!all(IsFinite(Out.Radiance)))
+    {
+        Out.Radiance = 0.0f;
+        Out.bPartial = true;
+    }
+    return Out;
+}
 
 RAY_TRACING_ENTRY_RAYGEN(MainRGS)
 {
@@ -38,6 +259,10 @@ RAY_TRACING_ENTRY_RAYGEN(MainRGS)
     MaterialHitData0[LocalPixel] = float4(0, 0, 0, 0);
     MaterialHitData1[LocalPixel] = float4(0, 0, 0, 0);
     MaterialHitFlags[LocalPixel] = 0u;
+    ReflectionRadiance[LocalPixel] = 0.0f;
+    SecondaryEmissive[LocalPixel] = 0.0f;
+    SecondaryDirect[LocalPixel] = 0.0f;
+    ReflectionRadianceFlags[LocalPixel] = 0u;
 
     const float4 Sample = PrimaryDirection.Load(int3(LocalPixel, 0));
     if (Sample.w <= 0.0f || !all(IsFinite(Sample.xyz)))
@@ -46,6 +271,20 @@ RAY_TRACING_ENTRY_RAYGEN(MainRGS)
     }
 
     uint Flags = AJ_HIT_PRIMARY;
+    uint RadianceFlags = AJ_RAD_PRIMARY_VALID;
+    const uint SampleClass = PrimarySamplingClass.Load(int3(LocalPixel, 0));
+    if (SampleClass == AJ_SAMPLE_CLASS_COMPLEX_FALLBACK)
+    {
+        RadianceFlags |= AJ_RAD_PRIMARY_COMPLEX;
+    }
+    const float4 Transport = PrimaryTransport.Load(int3(LocalPixel, 0));
+    const bool bSupportedPrimary = Transport.w > 0.0f
+        && all(IsFinite(Transport.xyz)) && all(Transport.xyz >= 0.0f);
+    if (bSupportedPrimary)
+    {
+        RadianceFlags |= AJ_RAD_PRIMARY_SUPPORTED;
+    }
+    ReflectionRadianceFlags[LocalPixel] = RadianceFlags;
     MaterialHitFlags[LocalPixel] = Flags;
     if (MaxTraceDistance <= 0.0f)
     {
@@ -85,6 +324,7 @@ RAY_TRACING_ENTRY_RAYGEN(MainRGS)
         return;
     }
     Flags |= AJ_HIT_COMMITTED;
+    RadianceFlags |= AJ_RAD_SECONDARY_HIT;
 
 #if SUBSTRATE_GBUFFER_FORMAT == 1
     // This is the native OFF-SCREEN MATERIAL payload, not the primary
@@ -139,4 +379,70 @@ RAY_TRACING_ENTRY_RAYGEN(MainRGS)
     }
 #endif
     MaterialHitFlags[LocalPixel] = Flags;
+    if ((Flags & AJ_HIT_PAYLOAD) != 0u)
+    {
+        RadianceFlags |= AJ_RAD_SECONDARY_PAYLOAD;
+    }
+    // Preserve Week 4A material diagnostics for complex-primary geometric rays,
+    // but never call their mirror fallback a valid scattering estimator.
+    if (bSupportedPrimary)
+    {
+        float3 ValidEmissiveHDR = 0.0f;
+        float3 ValidDirectHDR = 0.0f;
+        // CHS material emissive is scene-referred. TraceMaterialRay explicitly
+        // disables CHS skylight evaluation, so this is not double lighting.
+        const float3 EmissiveScene = Hit.Radiance;
+        if (all(IsFinite(EmissiveScene)))
+        {
+            const float3 EmissiveHDR = EmissiveScene * View.PreExposure;
+            if (all(IsFinite(EmissiveHDR)))
+            {
+                SecondaryEmissive[LocalPixel] = float4(EmissiveHDR, 1.0f);
+                ValidEmissiveHDR = EmissiveHDR;
+                if (any(EmissiveHDR > 0.0f))
+                {
+                    RadianceFlags |= AJ_RAD_EMISSIVE_PRESENT;
+                }
+            }
+        }
+        else
+        {
+            RadianceFlags |= AJ_RAD_DIRECT_PARTIAL;
+        }
+
+        const FAJSecondaryDirectResult Direct = AJEvaluateSecondaryInfiniteLights(Hit, Ray);
+        if (Direct.bEvaluated)
+        {
+            RadianceFlags |= AJ_RAD_DIRECT_EVALUATED;
+        }
+        if (Direct.bPartial)
+        {
+            RadianceFlags |= AJ_RAD_DIRECT_PARTIAL;
+        }
+        const float3 DirectHDR = Direct.Radiance * View.PreExposure;
+        if (all(IsFinite(DirectHDR)))
+        {
+            SecondaryDirect[LocalPixel] = float4(DirectHDR, 1.0f);
+            ValidDirectHDR = DirectHDR;
+        }
+        else
+        {
+            RadianceFlags |= AJ_RAD_DIRECT_PARTIAL;
+        }
+
+        // Use register values, not UAV readback within the same invocation.
+        const float3 Final = Transport.xyz * (ValidEmissiveHDR + ValidDirectHDR);
+        // Finite HDR values above 1 are retained. No clamping or tonemapping.
+        if (all(IsFinite(Final)))
+        {
+            ReflectionRadiance[LocalPixel] = float4(Final, Hit.HitT);
+        }
+        else
+        {
+            SecondaryEmissive[LocalPixel] = 0.0f;
+            SecondaryDirect[LocalPixel] = 0.0f;
+            RadianceFlags |= AJ_RAD_DIRECT_PARTIAL;
+        }
+    }
+    ReflectionRadianceFlags[LocalPixel] = RadianceFlags;
 }

@@ -123,6 +123,12 @@ float3 AJReadPrimaryTopClosureF0(uint2 ScenePixel, bool bPrimaryValid)
 #include "/Engine/Private/MonteCarlo.ush"
 #include "/Engine/Private/PathTracing/Utilities/PathTracingRandomSequence.ush"
 
+// Evaluate only in the permanent primary-sampling shader; legacy inline tracing
+// still compiles and runs the original Week 3C sampling code without this path.
+#if AJ_ENABLE_PRIMARY_REFLECTION_TRANSPORT
+#include "/Engine/Private/Substrate/SubstrateEvaluation.ush"
+#endif
+
 // This descriptor exists for *one selected primary lobe* and only for this ray.
 // It is not the material representation of AJReflections.
 struct FAJPrimaryReflectionLobe
@@ -412,4 +418,130 @@ uint AJPackPrimaryReflectionSampleFlags(FAJPrimaryReflectionSample Sample)
         | (Sample.SamplingClass == AJ_SAMPLE_CLASS_COMPLEX_FALLBACK
             ? AJ_SAMPLE_FLAG_COMPLEX_FALLBACK : 0u);
 }
+
+#if AJ_ENABLE_PRIMARY_REFLECTION_TRANSPORT
+// One selected native primary Slab (not an AJ material copy).  ScenePixel,
+// Sample and IncidentDirection refer to *the same* primary sample/closure.
+struct FAJPrimaryReflectionTransport
+{
+    bool bValid;
+    float3 Weight; // Dimensionless selected-event estimator. Never display-clamp.
+};
+
+FAJPrimaryReflectionTransport AJEvaluatePrimaryReflectionTransport(
+    uint2 ScenePixel,
+    float3 IncidentDirection,
+    FAJPrimaryReflectionSample Sample,
+    bool bStochastic)
+{
+    FAJPrimaryReflectionTransport Out = (FAJPrimaryReflectionTransport)0;
+    // Week 3C's deterministic A/B mirror is geometrical when the underlying
+    // material is rough. It must not be given a fictitious delta estimator.
+    if (!bStochastic || !Sample.bValid
+        || Sample.SamplingClass == AJ_SAMPLE_CLASS_COMPLEX_FALLBACK
+        || Sample.SelectionProbability <= 0.0f)
+    {
+        return Out;
+    }
+
+    const float3 V = -IncidentDirection;
+    const float3 L = Sample.Direction;
+    FSubstrateBSDF SelectedBSDF = (FSubstrateBSDF)0;
+    float3x3 SelectedBasis = (float3x3)0;
+    bool bFound = false;
+
+#if SUBSTRATE_LOAD_FROM_MATERIALCONTAINER
+    FSubstrateAddressing Addressing = GetSubstratePixelDataByteOffset(
+        ScenePixel, uint2(View.BufferSizeAndInvSize.xy), Substrate.MaxBytesPerPixel);
+    const FSubstratePixelHeader Header = UnpackSubstrateHeaderIn(
+        Substrate.MaterialTextureArray, Addressing, Substrate.TopLayerTexture);
+    // Crucially, retrieve the *already selected* index rather than sampling
+    // the distribution again. UnpackSubstrateBSDFIn advances variable data.
+    [loop]
+    for (uint I = 0u;
+         I < min(Header.ClosureCount, (uint)SUBSTRATE_MAX_CLOSURE_COUNT);
+         ++I)
+    {
+        const FSubstrateBSDF BSDF = UnpackSubstrateBSDFIn(
+            Substrate.MaterialTextureArray, Addressing, Header);
+        if (I == Sample.ClosureIndex && BSDF_GETISTOPLAYER(BSDF) != 0u
+            && AJIsSupportedGGXReflectionBSDF(BSDF))
+        {
+            SelectedBSDF = BSDF;
+            SelectedBasis = SubstrateGetBSDFSharedBasis(Header, BSDF, Addressing);
+            bFound = true;
+        }
+    }
+#else
+    const FSubstrateGBufferBSDF Native = SubstrateReadGBufferBSDF(
+        GetScreenSpaceDataUint(ScenePixel));
+    if (Sample.ClosureIndex == 0u && AJIsSupportedGGXReflectionBSDF(Native.BSDF))
+    {
+        SelectedBSDF = Native.BSDF;
+        SelectedBasis = Native.BSDFTangentBasis;
+        bFound = true;
+    }
+#endif
+    if (!bFound || !all(IsFinite(SelectedBasis[2])))
+    {
+        return Out;
+    }
+
+    const FSubstrateBSDFContext Context = SubstrateCreateBSDFContext(
+        SelectedBSDF, SelectedBasis, V, L, ScenePixel);
+    const float NoL = saturate(dot(Context.N, L));
+    const float NoV = saturate(dot(Context.N, V));
+    if (NoL <= 0.0f || NoV <= 0.0f)
+    {
+        return Out;
+    }
+
+    const float3 LayerWeight = LuminanceWeight(Context, SelectedBSDF);
+    float3 Weight = 0.0f;
+    if (Sample.SamplingClass == AJ_SAMPLE_CLASS_MIRROR)
+    {
+        // The Week 3C roughness<=0.02 branch is a *discrete* event. Its PDF=1
+        // means unit mass, not one inverse-steradian. Use UE's own Schlick
+        // Fresnel and GGX energy-conservation term at the specular limit.
+        if (SubstrateGetBSDFRoughness(SelectedBSDF) > SUBSTRATE_MIN_GGX_ROUGHNESS)
+        {
+            return Out;
+        }
+        const float3 F0 = SubstrateGetBSDFSpecularF0(SelectedBSDF);
+        const float3 F90 = SubstrateGetBSDFSpecularF90(SelectedBSDF);
+        const float3 F = Substrate_F_GGX(F0, F90, NoV);
+        const FBxDFEnergyTerms Energy = ComputeGGXSpecEnergyTerms(
+            SUBSTRATE_MIN_GGX_ROUGHNESS, NoV, F0, F90);
+        Weight = LayerWeight * F * ComputeEnergyConservation(Energy)
+            / Sample.SelectionProbability;
+    }
+    else if (Sample.SamplingClass == AJ_SAMPLE_CLASS_GGX_ISOTROPIC
+        || Sample.SamplingClass == AJ_SAMPLE_CLASS_GGX_ANISOTROPIC)
+    {
+        if (Sample.DirectionalPDF <= 0.0f)
+        {
+            return Out;
+        }
+        const FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings();
+        const FSubstrateEvaluateResult Eval = SubstrateEvaluateBSDF(Context, Settings);
+        // Eval.SpecularPathValue is the native selected Slab's f_i(V,L),
+        // without projected solid angle and without its selection probability.
+        // LuminanceWeight supplies the UE coverage/overlayer attenuation.
+        Weight = LayerWeight * Eval.SpecularPathValue * NoL
+            / (Sample.SelectionProbability * Sample.DirectionalPDF);
+    }
+    else
+    {
+        return Out;
+    }
+
+    if (!all(IsFinite(Weight)) || any(Weight < 0.0f))
+    {
+        return Out;
+    }
+    Out.Weight = Weight;
+    Out.bValid = true;
+    return Out;
+}
+#endif // AJ_ENABLE_PRIMARY_REFLECTION_TRANSPORT
 #endif // AJ_ENABLE_PRIMARY_REFLECTION_SAMPLING

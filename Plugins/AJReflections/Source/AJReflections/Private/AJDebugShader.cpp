@@ -42,7 +42,11 @@ namespace
         TEXT("20: Final pre-exposed HDR reflection radiance\n")
         TEXT("21: Secondary material emissive (pre-exposed HDR)\n")
         TEXT("22: Shadowed secondary directional light (pre-exposed HDR)\n")
-        TEXT("23: Primary selected-closure transport (display mapped)\n"),
+        TEXT("23: Primary selected-closure transport (display mapped)\n")
+        TEXT("24: Previous-frame reflection radiance (exposure-adjusted debug)\n")
+        TEXT("25: Previous-frame secondary hit distance\n")
+        TEXT("26: Previous-frame reflection radiance flags\n")
+        TEXT("27: History validity / reset reason\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(

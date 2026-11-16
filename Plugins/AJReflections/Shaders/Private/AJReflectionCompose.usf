@@ -14,12 +14,20 @@ Texture2D<float4> ReflectionRadiance;
 Texture2D<float4> SecondaryEmissive;
 Texture2D<float4> SecondaryDirect;
 #endif
+#if AJ_COMPOSE_HAS_HISTORY
+Texture2D<float4> PreviousReflectionRadiance;
+Texture2D<uint> PreviousReflectionRadianceFlags;
+#endif
+float HistoryExposureRatio;
+float DebugTraceDistanceMax;
+uint HistoryResetReason;
+
 
 float4 MainPS(float4 SvPosition : SV_POSITION) : SV_Target0
 {
-    float3 Color = 0.0f; // Backend-off modes 16..23 intentionally display black.
-#if AJ_COMPOSE_HAS_INPUTS
+    float3 Color = 0.0f;
     const uint2 LocalPixel = uint2(int2(SvPosition.xy) - ViewRectMin);
+#if AJ_COMPOSE_HAS_INPUTS
     if (DebugMode >= 16 && DebugMode <= 19)
     {
         // Preserve the exact Week 4A secondary-material diagnostics.
@@ -72,5 +80,56 @@ float4 MainPS(float4 SvPosition : SV_POSITION) : SV_Target0
         Color = Transport.w > 0.0f ? W / (1.0f + W) : 0.0f;
     }
 #endif
+#if AJ_COMPOSE_HAS_HISTORY
+    if (DebugMode == 24)
+    {
+        // SAME PIXEL, no reprojection or blending. Conversion is display-only.
+        Color = PreviousReflectionRadiance.Load(int3(LocalPixel, 0)).rgb
+            * HistoryExposureRatio;
+    }
+    else if (DebugMode == 25)
+    {
+        const float RawHitDistance = PreviousReflectionRadiance.Load(int3(LocalPixel, 0)).a;
+        const float DistanceDisplay = saturate(RawHitDistance / max(DebugTraceDistanceMax, 1.0e-6f));
+        Color = float3(DistanceDisplay, DistanceDisplay, DistanceDisplay);
+    }
+    else if (DebugMode == 26)
+    {
+        const uint Flags = PreviousReflectionRadianceFlags.Load(int3(LocalPixel, 0));
+        // Exactly Week 4B bits: 7 complex primary, 6 partial secondary,
+        // 5 direct, 4 emissive, 2 hit, 1 primary-supported, 0 primary valid.
+        if      ((Flags & (1u << 7u)) != 0u) Color = float3(1.0f, 0.0f, 0.0f);
+        else if ((Flags & (1u << 6u)) != 0u) Color = float3(1.0f, 0.0f, 1.0f);
+        else if ((Flags & (1u << 5u)) != 0u) Color = float3(0.0f, 1.0f, 1.0f);
+        else if ((Flags & (1u << 4u)) != 0u) Color = float3(1.0f, 0.55f, 0.0f);
+        else if ((Flags & (1u << 2u)) != 0u) Color = float3(1.0f, 1.0f, 1.0f);
+        else if ((Flags & (1u << 1u)) != 0u) Color = float3(0.0f, 0.3f, 0.8f);
+        else if ((Flags & 1u) != 0u)         Color = float3(0.0f, 0.15f, 0.35f);
+    }
+#endif
+    if (DebugMode == 27)
+    {
+        // Matches EAJReflectionHistoryResetReason (CPU diagnostic enum).
+        // Green valid, black first frame, red camera cut, yellow resize,
+        // orange gap, blue stateless, magenta backend off.
+        if (HistoryResetReason == 0u)
+            Color = float3(0.0f, 1.0f, 0.0f);
+        else if (HistoryResetReason == 1u)
+            Color = float3(0.0f, 0.0f, 1.0f);
+        else if (HistoryResetReason == 2u)
+            Color = 0.0f;
+        else if (HistoryResetReason == 3u)
+            Color = float3(1.0f, 0.0f, 0.0f);
+        else if (HistoryResetReason == 4u)
+            Color = float3(1.0f, 1.0f, 0.0f);
+        else if (HistoryResetReason == 5u)
+            Color = float3(1.0f, 0.5f, 0.0f);
+        else if (HistoryResetReason == 6u)
+            Color = float3(1.0f, 0.0f, 1.0f);
+        else if (HistoryResetReason == 7u)
+            Color = float3(0.55f, 0.0f, 0.75f);
+        else if (HistoryResetReason == 8u)
+            Color = float3(0.3f, 0.3f, 0.3f);
+    }
     return float4(Color, 1.0f);
 }

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "OpaqueReflectionExtension.h"
+#include "AJReflectionHistory.h"
 
 /** Plugin-owned implementation of the generic renderer reflection extension. */
 class FAJRendererExtension final : public IRendererOpaqueReflectionExtension
@@ -17,4 +18,9 @@ public:
     virtual void RenderOpaqueReflections(
         const FOpaqueReflectionRenderContext& Context) const override;
 #endif
+
+private:
+    // The Renderer calls RenderOpaqueReflections through a const interface.
+    // State changes occur only on the render thread; never on game/worker threads.
+    mutable FAJReflectionHistory History;
 };

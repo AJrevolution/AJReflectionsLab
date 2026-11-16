@@ -41,13 +41,36 @@ void FAJRendererExtension::RenderOpaqueReflections(
         return;
     }
 
-    // Feature runs independent of DebugMode. The backend toggle only affects
-    // the programmable material pass; inline diagnostic backend is untouched.
+    // Begin previous-frame ownership BEFORE queuing current extraction.
+    // Even in DebugMode 0, the semantic history is produced each frame.
+    const bool bBackendAvailable = IsAJMaterialHitBackendEnabled_AnyThread();
+    FAJPreviousReflectionHistory Previous = History.BeginViewHistory(
+        Context.GraphBuilder, Context.View, Context.ViewRect, bBackendAvailable);
+
     const FAJMaterialHitOutputs Outputs = AddAJMaterialHitPass(Context);
-    const int32 DebugMode = GetAJDebugMode_AnyThread();
-    if (DebugMode >= 16 && DebugMode <= 23)
+    if (!Outputs.HasRadiance())
     {
-        AddAJReflectionComposePass(Context, Outputs, DebugMode);
+        // No current semantic sample means no valid history for this view.
+        History.InvalidateViewHistory(Context.View);
+        Previous = FAJPreviousReflectionHistory{};
+        Previous.ResetReason = bBackendAvailable
+            ? EAJReflectionHistoryResetReason::MissingResource
+            : EAJReflectionHistoryResetReason::BackendUnavailable;
+    }
+
+    const int32 DebugMode = GetAJDebugMode_AnyThread();
+    if (DebugMode >= 16 && DebugMode <= 27)
+    {
+        AddAJReflectionComposePass(Context, Outputs, Previous, DebugMode);
+    }
+
+    // Queue extraction only AFTER previous RDG inputs and presentation are set.
+    // Destination slots live in stable shared-allocated history entries.
+    if (Outputs.HasRadiance())
+    {
+        History.CommitViewHistory(
+            Context.GraphBuilder, Context.View, Context.ViewRect,
+            Outputs.ReflectionRadiance, Outputs.ReflectionRadianceFlags);
     }
 }
 #endif

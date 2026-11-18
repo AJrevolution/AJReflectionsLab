@@ -1,0 +1,117 @@
+// Week 5B: deterministic primary surface and source-correct current-to-previous motion.
+// All texture indices are compact *current view-local* except ScenePixel.
+#include "/Engine/Private/Common.ush"
+#define SUBSTRATE_SSS_MATERIAL_OVERRIDE 0
+#define SUBSTRATE_SSS_TRANSMISSION 0
+#define SUBSTRATE_COMPLEXSPECIALPATH 1
+#include "/Engine/Private/DeferredShadingCommon.ush"
+#include "/AJReflections/Private/AJSubstrateMaterial.ush"
+
+int2 OutputSize;
+int2 ViewRectMin;
+RWTexture2D<float4> TemporalSurface0;
+RWTexture2D<float4> TemporalSurface1;
+RWTexture2D<float4> MotionData;
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint2 LocalPixel = DispatchThreadId.xy;
+    if (any(LocalPixel >= uint2(OutputSize)))
+    {
+        return;
+    }
+
+    TemporalSurface0[LocalPixel] = 0.0f;
+    TemporalSurface1[LocalPixel] = 0.0f;
+    MotionData[LocalPixel] = 0.0f;
+
+    const uint2 ScenePixel = LocalPixel + uint2(ViewRectMin);
+    const float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ScenePixel, 0)).r;
+    // UE's reversed-Z far/sky clear depth is zero.
+    if (!(DeviceZ > 0.0f) || !IsFinite(DeviceZ))
+    {
+        return;
+    }
+
+    const FAJPrimarySurfaceDiagnostic Primary = AJReadPrimarySurface(ScenePixel);
+    const float ViewZ = ConvertFromDeviceZ(DeviceZ);
+    const float3 N = Primary.WorldNormal;
+    if (!Primary.bValid || !all(IsFinite(N)) || dot(N, N) < 0.25f
+        || !IsFinite(ViewZ) || ViewZ <= 0.0f || !IsFinite(Primary.Roughness))
+    {
+        return;
+    }
+
+    // The top/visible closure signature is deterministic: never use the sampled lobe.
+    const float3 TopF0 = AJReadPrimaryTopClosureF0(ScenePixel, true);
+    if (!all(IsFinite(TopF0)))
+    {
+        return;
+    }
+    TemporalSurface0[LocalPixel] = float4(normalize(N), ViewZ);
+    TemporalSurface1[LocalPixel] = float4(TopF0, saturate(Primary.Roughness));
+
+    // Local pixel centers are [0.5 .. Size-0.5]. Convert into UE screen/NDC
+    // coordinates (x right, y up). SceneVelocity stores CURRENT - PREVIOUS.
+    const float2 CurrentRasterScreen = float2(
+        2.0f * ((float(LocalPixel.x) + 0.5f) / float(OutputSize.x)) - 1.0f,
+        1.0f - 2.0f * ((float(LocalPixel.y) + 0.5f) / float(OutputSize.y)));
+
+    // Calculate3DVelocityBase() subtracts both temporal jitters. The native
+    // ClipToPrevClip uses unjittered projections. Convert raster to that space.
+    const float2 CurrentUnjittered = CurrentRasterScreen - View.TemporalAAJitter.xy;
+    const float4 ThisClip = float4(CurrentUnjittered, DeviceZ, 1.0f);
+    const float4 PrevClip = mul(ThisClip, View.ClipToPrevClip);
+    if (!all(IsFinite(PrevClip)) || abs(PrevClip.w) < 1.0e-7f)
+    {
+        return;
+    }
+    const float3 StaticPrevious = PrevClip.xyz / PrevClip.w;
+
+    const float4 EncodedVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(ScenePixel, 0));
+    const bool bNativeVelocity = EncodedVelocity.x > 0.0f;
+    float3 PreviousScreenAndDeviceZ = StaticPrevious;
+    uint Source = 2u; // camera-only projection fallback
+    if (bNativeVelocity)
+    {
+        const float3 ScreenVelocity = DecodeVelocityFromTexture(EncodedVelocity);
+        if (!all(IsFinite(ScreenVelocity)))
+        {
+            return;
+        }
+        // Motion is in unjittered screen/NDC units, and z = current - previous DeviceZ.
+        PreviousScreenAndDeviceZ = float3(CurrentUnjittered, DeviceZ) - ScreenVelocity;
+        Source = 1u;
+    }
+
+    const float PrevDeviceZ = PreviousScreenAndDeviceZ.z;
+    if (!all(IsFinite(PreviousScreenAndDeviceZ)) || PrevDeviceZ <= 0.0f || PrevDeviceZ > 1.0f)
+    {
+        return;
+    }
+
+    // Previous stored depth/color were rasterized with PREVIOUS jitter.
+    const float2 PreviousRasterScreen = PreviousScreenAndDeviceZ.xy + View.TemporalAAJitter.zw;
+    const float2 PreviousLocalPixelCenter = float2(
+        (PreviousRasterScreen.x * 0.5f + 0.5f) * float(OutputSize.x),
+        (0.5f - PreviousRasterScreen.y * 0.5f) * float(OutputSize.y));
+
+    // Use the actual previous projection, not today's ConvertFromDeviceZ for
+    // moving primitives. UE's view-space z is linear ViewZ in world units.
+    const float4 PreviousViewH = mul(
+        float4(PreviousRasterScreen, PrevDeviceZ, 1.0f), View.PrevClipToView);
+    if (!all(IsFinite(PreviousViewH)) || abs(PreviousViewH.w) < 1.0e-7f)
+    {
+        return;
+    }
+    const float ExpectedPreviousViewZ = PreviousViewH.z / PreviousViewH.w;
+    if (!all(IsFinite(PreviousLocalPixelCenter))
+        || !IsFinite(ExpectedPreviousViewZ) || ExpectedPreviousViewZ <= 0.0f)
+    {
+        return;
+    }
+
+    MotionData[LocalPixel] = float4(
+        PreviousLocalPixelCenter, ExpectedPreviousViewZ, float(Source));
+}

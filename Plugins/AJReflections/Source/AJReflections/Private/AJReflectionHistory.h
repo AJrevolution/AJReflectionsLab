@@ -28,6 +28,8 @@ struct FAJPreviousReflectionHistory
 {
     FRDGTextureRef Radiance = nullptr;
     FRDGTextureRef Flags = nullptr;
+    FRDGTextureRef Surface0 = nullptr;
+    FRDGTextureRef Surface1 = nullptr;
     float PreviousPreExposure = 1.0f;
     bool bValid = false;
     EAJReflectionHistoryResetReason ResetReason = EAJReflectionHistoryResetReason::FirstFrame;
@@ -71,7 +73,9 @@ public:
         const FSceneView& View,
         const FIntRect& ViewRect,
         FRDGTextureRef CurrentReflectionRadiance,
-        FRDGTextureRef CurrentReflectionRadianceFlags);
+        FRDGTextureRef CurrentReflectionRadianceFlags,
+        FRDGTextureRef CurrentTemporalSurface0,
+        FRDGTextureRef CurrentTemporalSurface1);
 
     // Called when material output cannot be produced. No cached resource survives.
     void InvalidateViewHistory(const FSceneView& View);

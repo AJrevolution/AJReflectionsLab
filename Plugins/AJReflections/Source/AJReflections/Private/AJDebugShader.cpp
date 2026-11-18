@@ -46,7 +46,14 @@ namespace
         TEXT("24: Previous-frame reflection radiance (exposure-adjusted debug)\n")
         TEXT("25: Previous-frame secondary hit distance\n")
         TEXT("26: Previous-frame reflection radiance flags\n")
-        TEXT("27: History validity / reset reason\n"),
+        TEXT("27: History validity / reset reason\n")
+        TEXT("28: Reprojected accepted previous radiance\n")
+        TEXT("29: History acceptance mask\n")
+        TEXT("30: History rejection reason\n")
+        TEXT("31: Relative linear-depth consistency\n")
+        TEXT("32: World-normal consistency\n")
+        TEXT("33: Roughness / F0 consistency\n")
+        TEXT("34: Reprojected previous hit distance\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(

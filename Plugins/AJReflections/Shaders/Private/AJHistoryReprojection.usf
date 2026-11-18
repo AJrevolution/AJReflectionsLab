@@ -1,0 +1,193 @@
+// Week 5B: one reprojected prior sample plus binary per-pixel compatibility.
+// No accumulation, filtering, or hit-distance-based hard rejection.
+#include "/Engine/Private/Common.ush"
+
+#define AJ_HIST_ACCEPTED              (1u << 0u)
+#define AJ_HIST_CURRENT_INVALID       (1u << 1u)
+#define AJ_HIST_MOTION_INVALID        (1u << 2u)
+#define AJ_HIST_OUTSIDE               (1u << 3u)
+#define AJ_HIST_PREVIOUS_INVALID      (1u << 4u)
+#define AJ_HIST_DEPTH                 (1u << 5u)
+#define AJ_HIST_NORMAL                (1u << 6u)
+#define AJ_HIST_ROUGHNESS             (1u << 7u)
+#define AJ_HIST_F0                    (1u << 8u)
+#define AJ_HIST_NO_CANDIDATE          (1u << 9u)
+
+int2 OutputSize;
+float HistoryExposureRatio;
+float DepthThreshold;
+float NormalThreshold;
+float RoughnessThreshold;
+float F0Threshold;
+Texture2D<uint> CurrentRadianceFlags;
+Texture2D<float4> CurrentSurface0;
+Texture2D<float4> CurrentSurface1;
+Texture2D<float4> MotionData;
+Texture2D<float4> PreviousRadiance;
+Texture2D<uint> PreviousRadianceFlags;
+Texture2D<float4> PreviousSurface0;
+Texture2D<float4> PreviousSurface1;
+RWTexture2D<float4> ReprojectedRadiance;
+RWTexture2D<uint> ReprojectedHistoryFlags;
+RWTexture2D<float> HistoryAcceptance;
+RWTexture2D<uint> HistoryRejectionFlags;
+RWTexture2D<float4> HistoryConsistency;
+
+// Week 4B: bit 0 primary sample valid; bit 1 supported estimator;
+// bit 7 explicitly complex-primary, therefore not reusable radiance.
+bool AJSupportedPrimary(uint Flags)
+{
+    return (Flags & 3u) == 3u && (Flags & (1u << 7u)) == 0u;
+}
+
+bool AJValidSurface(float4 S0, float4 S1)
+{
+    return all(IsFinite(S0)) && all(IsFinite(S1))
+        && S0.w > 0.0f && dot(S0.xyz, S0.xyz) > 0.25f;
+}
+
+// Debug RGBA: R relative depth error, G world-normal dot, B roughness
+// difference, A max RGB F0-component difference. Not an accumulated signal.
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint2 CurrentPixel = DispatchThreadId.xy;
+    if (any(CurrentPixel >= uint2(OutputSize)))
+    {
+        return;
+    }
+
+    ReprojectedRadiance[CurrentPixel] = 0.0f;
+    ReprojectedHistoryFlags[CurrentPixel] = 0u;
+    HistoryAcceptance[CurrentPixel] = 0.0f;
+    HistoryRejectionFlags[CurrentPixel] = 0u;
+    HistoryConsistency[CurrentPixel] = 0.0f;
+
+    const uint CurrentFlags = CurrentRadianceFlags.Load(int3(CurrentPixel, 0));
+    const float4 CurrentS0 = CurrentSurface0.Load(int3(CurrentPixel, 0));
+    const float4 CurrentS1 = CurrentSurface1.Load(int3(CurrentPixel, 0));
+    if (!AJSupportedPrimary(CurrentFlags) || !AJValidSurface(CurrentS0, CurrentS1))
+    {
+        HistoryRejectionFlags[CurrentPixel] = AJ_HIST_CURRENT_INVALID;
+        return;
+    }
+
+    const float4 Motion = MotionData.Load(int3(CurrentPixel, 0));
+    const float2 PrevCenter = Motion.xy;
+    const float ExpectedPrevViewZ = Motion.z;
+    if (!all(IsFinite(Motion)) || Motion.w < 0.5f
+        || ExpectedPrevViewZ <= 0.0f)
+    {
+        HistoryRejectionFlags[CurrentPixel] = AJ_HIST_MOTION_INVALID;
+        return;
+    }
+
+    // Previous coordinates are in view-local pixel-center units, not buffer UV.
+    // Never clamp to a border texel; outside previous-view support is invalid.
+    if (any(PrevCenter < 0.0f) || any(PrevCenter >= float2(OutputSize)))
+    {
+        HistoryRejectionFlags[CurrentPixel] = AJ_HIST_OUTSIDE | AJ_HIST_NO_CANDIDATE;
+        return;
+    }
+
+    const int2 Base = int2(floor(PrevCenter - 0.5f));
+    uint RejectedReasons = 0u;
+    bool bFoundAccepted = false;
+    bool bFoundDiagnostic = false;
+    float BestAcceptedDepthError = 3.402823e+38f;
+    float BestDiagnosticError = 3.402823e+38f;
+    float4 BestAcceptedRadiance = 0.0f;
+    uint BestAcceptedFlags = 0u;
+    float4 BestDiagnostic = 0.0f;
+
+    // Check exactly the 2x2 nearest previous sample footprint. Point-load the
+    // BEST ACCEPTED texel; do not bilinear-filter across depth/material edges.
+    [unroll]
+    for (int Y = 0; Y < 2; ++Y)
+    {
+        [unroll]
+        for (int X = 0; X < 2; ++X)
+        {
+            const int2 Candidate = Base + int2(X, Y);
+            if (any(Candidate < int2(0, 0)) || any(Candidate >= OutputSize))
+            {
+                RejectedReasons |= AJ_HIST_OUTSIDE;
+                continue;
+            }
+
+            const uint PreviousFlags = PreviousRadianceFlags.Load(int3(Candidate, 0));
+            const float4 PreviousS0 = PreviousSurface0.Load(int3(Candidate, 0));
+            const float4 PreviousS1 = PreviousSurface1.Load(int3(Candidate, 0));
+            if (!AJSupportedPrimary(PreviousFlags) || !AJValidSurface(PreviousS0, PreviousS1))
+            {
+                RejectedReasons |= AJ_HIST_PREVIOUS_INVALID;
+                continue;
+            }
+
+            // Relative linear-depth consistency (100 UE-unit floor = 1 m in
+            // the default cm world scale). Expected depth comes from previous
+            // clip depth, including native z-velocity for moving primitives.
+            const float DepthError = abs(PreviousS0.w - ExpectedPrevViewZ)
+                / max(abs(ExpectedPrevViewZ), 100.0f);
+            const float NormalDot = dot(normalize(CurrentS0.xyz), normalize(PreviousS0.xyz));
+            const float RoughnessError = abs(CurrentS1.w - PreviousS1.w);
+            const float3 F0Difference = abs(CurrentS1.xyz - PreviousS1.xyz);
+            const float F0Error = max(F0Difference.x, max(F0Difference.y, F0Difference.z));
+            if (!IsFinite(DepthError) || !IsFinite(NormalDot)
+                || !IsFinite(RoughnessError) || !IsFinite(F0Error))
+            {
+                RejectedReasons |= AJ_HIST_PREVIOUS_INVALID;
+                continue;
+            }
+
+            const float4 Diagnostic = float4(DepthError, NormalDot, RoughnessError, F0Error);
+            if (!bFoundDiagnostic || DepthError < BestDiagnosticError)
+            {
+                bFoundDiagnostic = true;
+                BestDiagnosticError = DepthError;
+                BestDiagnostic = Diagnostic;
+            }
+
+            uint CandidateReasons = 0u;
+            if (DepthError > DepthThreshold) CandidateReasons |= AJ_HIST_DEPTH;
+            if (NormalDot < NormalThreshold) CandidateReasons |= AJ_HIST_NORMAL;
+            if (RoughnessError > RoughnessThreshold) CandidateReasons |= AJ_HIST_ROUGHNESS;
+            if (F0Error > F0Threshold) CandidateReasons |= AJ_HIST_F0;
+            if (CandidateReasons != 0u)
+            {
+                RejectedReasons |= CandidateReasons;
+                continue;
+            }
+
+            const float4 Radiance = PreviousRadiance.Load(int3(Candidate, 0));
+            if (!all(IsFinite(Radiance)))
+            {
+                RejectedReasons |= AJ_HIST_PREVIOUS_INVALID;
+                continue;
+            }
+            if (!bFoundAccepted || DepthError < BestAcceptedDepthError)
+            {
+                bFoundAccepted = true;
+                BestAcceptedDepthError = DepthError;
+                BestAcceptedRadiance = Radiance;
+                BestAcceptedFlags = PreviousFlags;
+                BestDiagnostic = Diagnostic;
+            }
+        }
+    }
+
+    HistoryConsistency[CurrentPixel] = bFoundDiagnostic ? BestDiagnostic : 0.0f;
+    if (bFoundAccepted)
+    {
+        ReprojectedRadiance[CurrentPixel] = float4(
+            BestAcceptedRadiance.rgb * HistoryExposureRatio,
+            BestAcceptedRadiance.a); // Previous material hit T: unmodified world units.
+        ReprojectedHistoryFlags[CurrentPixel] = BestAcceptedFlags;
+        HistoryAcceptance[CurrentPixel] = 1.0f;
+        HistoryRejectionFlags[CurrentPixel] = AJ_HIST_ACCEPTED;
+    }
+    else
+    {
+        HistoryRejectionFlags[CurrentPixel] = RejectedReasons | AJ_HIST_NO_CANDIDATE;
+    }
+}

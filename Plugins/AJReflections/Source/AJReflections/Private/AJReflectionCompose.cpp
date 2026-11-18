@@ -2,6 +2,7 @@
 #include "AJReflectionCompose.h"
 #include "AJMaterialHitRayTracing.h"
 #include "AJReflectionHistory.h"
+#include "AJHistoryReprojection.h"
 #include "AJReflectionTrace.h"
 #include "OpaqueReflectionExtension.h"
 
@@ -24,7 +25,8 @@ namespace
         SHADER_USE_PARAMETER_STRUCT(FAJReflectionComposePS, FGlobalShader);
         class FHaveInputs : SHADER_PERMUTATION_BOOL("AJ_COMPOSE_HAS_INPUTS");
         class FHaveHistory : SHADER_PERMUTATION_BOOL("AJ_COMPOSE_HAS_HISTORY");
-        using FPermutationDomain = TShaderPermutationDomain<FHaveInputs, FHaveHistory>;
+        class FHaveReprojection : SHADER_PERMUTATION_BOOL("AJ_COMPOSE_HAS_REPROJECTION");
+        using FPermutationDomain = TShaderPermutationDomain<FHaveInputs, FHaveHistory, FHaveReprojection>;
 
         BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
             SHADER_PARAMETER(FIntPoint, ViewRectMin)
@@ -32,6 +34,13 @@ namespace
             SHADER_PARAMETER(float, HistoryExposureRatio)
             SHADER_PARAMETER(float, DebugTraceDistanceMax)
             SHADER_PARAMETER(uint32, HistoryResetReason)
+            SHADER_PARAMETER(float, TemporalDepthThreshold)
+            SHADER_PARAMETER(float, TemporalRoughnessThreshold)
+            SHADER_PARAMETER(float, TemporalF0Threshold)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ReprojectedRadiance)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HistoryAcceptance)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, HistoryRejectionFlags)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HistoryConsistency)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, PreviousReflectionRadiance)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, PreviousReflectionRadianceFlags)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, MaterialHitData0)
@@ -56,10 +65,11 @@ void AddAJReflectionComposePass(
     const FOpaqueReflectionRenderContext& Context,
     const FAJMaterialHitOutputs& Hit,
     const FAJPreviousReflectionHistory& Previous,
+    const FAJHistoryReprojectionOutputs& Reprojected,
     int32 DebugMode)
 {
 #if RHI_RAYTRACING
-    if (Context.SceneColor == nullptr || DebugMode < 16 || DebugMode > 27)
+    if (Context.SceneColor == nullptr || DebugMode < 16 || DebugMode > 34)
     {
         return;
     }
@@ -77,6 +87,15 @@ void AddAJReflectionComposePass(
         : 1.0f;
     Parameters->PreviousReflectionRadiance = bHaveHistory ? Previous.Radiance : nullptr;
     Parameters->PreviousReflectionRadianceFlags = bHaveHistory ? Previous.Flags : nullptr;
+    const bool bHaveReprojection = Reprojected.IsValid();
+    const FAJHistoryReprojectionThresholds Thresholds = GetAJHistoryReprojectionThresholds_RenderThread();
+    Parameters->TemporalDepthThreshold = Thresholds.Depth;
+    Parameters->TemporalRoughnessThreshold = Thresholds.Roughness;
+    Parameters->TemporalF0Threshold = Thresholds.F0;
+    Parameters->ReprojectedRadiance = bHaveReprojection ? Reprojected.ReprojectedRadiance : nullptr;
+    Parameters->HistoryAcceptance = bHaveReprojection ? Reprojected.HistoryAcceptance : nullptr;
+    Parameters->HistoryRejectionFlags = bHaveReprojection ? Reprojected.HistoryRejectionFlags : nullptr;
+    Parameters->HistoryConsistency = bHaveReprojection ? Reprojected.HistoryConsistency : nullptr;
     const bool bHaveInputs = Hit.IsValid() && Hit.HasRadiance();
     Parameters->MaterialHitData0 = bHaveInputs ? Hit.MaterialHitData0 : nullptr;
     Parameters->MaterialHitData1 = bHaveInputs ? Hit.MaterialHitData1 : nullptr;
@@ -90,6 +109,7 @@ void AddAJReflectionComposePass(
     FAJReflectionComposePS::FPermutationDomain Permutation;
     Permutation.Set<FAJReflectionComposePS::FHaveInputs>(bHaveInputs);
     Permutation.Set<FAJReflectionComposePS::FHaveHistory>(bHaveHistory);
+    Permutation.Set<FAJReflectionComposePS::FHaveReprojection>(bHaveReprojection);
 
     const TShaderMapRef<FAJReflectionComposePS> Shader(
         GetGlobalShaderMap(Context.View.GetShaderPlatform()), Permutation);
@@ -104,6 +124,7 @@ void AddAJReflectionComposePass(
     (void)Context;
     (void)Hit;
     (void)Previous;
+    (void)Reprojected;
     (void)DebugMode;
 #endif
 }

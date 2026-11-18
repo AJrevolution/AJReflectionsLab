@@ -4,6 +4,8 @@
 #include "AJDebugShader.h"
 #include "AJMaterialHitRayTracing.h"
 #include "AJReflectionCompose.h"
+#include "AJTemporalInputs.h"
+#include "AJHistoryReprojection.h"
 
 #include "RenderUtils.h"
 #include "RHI.h"
@@ -58,19 +60,40 @@ void FAJRendererExtension::RenderOpaqueReflections(
             : EAJReflectionHistoryResetReason::BackendUnavailable;
     }
 
-    const int32 DebugMode = GetAJDebugMode_AnyThread();
-    if (DebugMode >= 16 && DebugMode <= 27)
+    // Deterministic primary surface + motion: always produced for a valid
+    // material backend, independent of DebugMode or previous-history validity.
+    FAJTemporalInputs Temporal;
+    FAJHistoryReprojectionOutputs Reprojected;
+    if (Outputs.HasRadiance())
     {
-        AddAJReflectionComposePass(Context, Outputs, Previous, DebugMode);
+        Temporal = AddAJTemporalInputsPass(Context);
+        if (Temporal.IsValid())
+        {
+            // This never writes current ReflectionRadiance or mixes two frames.
+            Reprojected = AddAJHistoryReprojectionPass(Context, Outputs, Temporal, Previous);
+        }
+        else
+        {
+            History.InvalidateViewHistory(Context.View);
+            Previous = FAJPreviousReflectionHistory{};
+            Previous.ResetReason = EAJReflectionHistoryResetReason::MissingResource;
+        }
     }
 
-    // Queue extraction only AFTER previous RDG inputs and presentation are set.
-    // Destination slots live in stable shared-allocated history entries.
-    if (Outputs.HasRadiance())
+    const int32 DebugMode = GetAJDebugMode_AnyThread();
+    if (DebugMode >= 16 && DebugMode <= 34)
+    {
+        AddAJReflectionComposePass(Context, Outputs, Previous, Reprojected, DebugMode);
+    }
+
+    // Old resources were registered before scheduling all four new extractions.
+    // Each destination is a field in a stable, separately allocated entry.
+    if (Outputs.HasRadiance() && Temporal.IsValid())
     {
         History.CommitViewHistory(
             Context.GraphBuilder, Context.View, Context.ViewRect,
-            Outputs.ReflectionRadiance, Outputs.ReflectionRadianceFlags);
+            Outputs.ReflectionRadiance, Outputs.ReflectionRadianceFlags,
+            Temporal.Surface0, Temporal.Surface1);
     }
 }
 #endif

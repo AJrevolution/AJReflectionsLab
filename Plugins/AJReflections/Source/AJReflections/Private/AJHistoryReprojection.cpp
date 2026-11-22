@@ -58,7 +58,11 @@ namespace
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, PreviousRadianceFlags)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, PreviousSurface0)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, PreviousSurface1)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D, PreviousAccumulatedRadiance)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, PreviousAccumulatedHistoryLength)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ReprojectedRadiance)
+            SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ReprojectedAccumulatedRadiance)
+            SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, ReprojectedAccumulatedHistoryLength)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, ReprojectedHistoryFlags)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, HistoryAcceptance)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, HistoryRejectionFlags)
@@ -97,7 +101,9 @@ FAJHistoryReprojectionOutputs AddAJHistoryReprojectionPass(
     FAJHistoryReprojectionOutputs Outputs;
 #if RHI_RAYTRACING
     if (!Previous.bValid || !Previous.Radiance || !Previous.Flags
-        || !Previous.Surface0 || !Previous.Surface1 || !Temporal.IsValid()
+        || !Previous.Surface0 || !Previous.Surface1
+        || !Previous.AccumulatedRadiance || !Previous.AccumulatedHistoryLength
+        || !Temporal.IsValid()
         || !Current.HasRadiance() || !Context.View.State)
     {
         return Outputs;
@@ -125,6 +131,8 @@ FAJHistoryReprojectionOutputs AddAJHistoryReprojectionPass(
     Outputs.HistoryAcceptance = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.HistoryAcceptance"));
     Outputs.HistoryRejectionFlags = GraphBuilder.CreateTexture(UintDesc, TEXT("AJReflections.HistoryRejectionFlags"));
     Outputs.HistoryConsistency = GraphBuilder.CreateTexture(Float4Desc, TEXT("AJReflections.HistoryConsistency"));
+    Outputs.ReprojectedAccumulatedRadiance = GraphBuilder.CreateTexture(Float4Desc, TEXT("AJReflections.ReprojectedAccumulatedRadiance"));
+    Outputs.ReprojectedAccumulatedHistoryLength = GraphBuilder.CreateTexture(UintDesc, TEXT("AJReflections.ReprojectedAccumulatedHistoryLength"));
 
     auto* Parameters = GraphBuilder.AllocParameters<FAJHistoryReprojectionCS::FParameters>();
     Parameters->OutputSize = Extent;
@@ -142,7 +150,13 @@ FAJHistoryReprojectionOutputs AddAJHistoryReprojectionPass(
     Parameters->PreviousRadianceFlags = Previous.Flags;
     Parameters->PreviousSurface0 = Previous.Surface0;
     Parameters->PreviousSurface1 = Previous.Surface1;
+    Parameters->PreviousAccumulatedRadiance = Previous.AccumulatedRadiance;
+    Parameters->PreviousAccumulatedHistoryLength = Previous.AccumulatedHistoryLength;
     Parameters->ReprojectedRadiance = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.ReprojectedRadiance));
+    Parameters->ReprojectedAccumulatedRadiance = GraphBuilder.CreateUAV(
+        FRDGTextureUAVDesc(Outputs.ReprojectedAccumulatedRadiance));
+    Parameters->ReprojectedAccumulatedHistoryLength = GraphBuilder.CreateUAV(
+        FRDGTextureUAVDesc(Outputs.ReprojectedAccumulatedHistoryLength));
     Parameters->ReprojectedHistoryFlags = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.ReprojectedHistoryFlags));
     Parameters->HistoryAcceptance = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.HistoryAcceptance));
     Parameters->HistoryRejectionFlags = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.HistoryRejectionFlags));

@@ -5,12 +5,16 @@ struct FOpaqueReflectionRenderContext;
 struct FAJMaterialHitOutputs;
 struct FAJPreviousReflectionHistory;
 struct FAJHistoryReprojectionOutputs;
+struct FAJTemporalAccumulationOutputs;
 
+/** Opaque-stage diagnostics and source + destination HDR presentation. */
+int32 GetAJReflectionPresentationMode_RenderThread();
 
-/** Current opaque-stage composition entry point (future HDR radiance extension). */
 void AddAJReflectionComposePass(
     const FOpaqueReflectionRenderContext& Context,
     const FAJMaterialHitOutputs& MaterialHit,
     const FAJPreviousReflectionHistory& Previous,
     const FAJHistoryReprojectionOutputs& Reprojected,
-    int32 DebugMode);
+    const FAJTemporalAccumulationOutputs& Accumulated,
+    int32 DebugMode,
+    int32 PresentationMode);

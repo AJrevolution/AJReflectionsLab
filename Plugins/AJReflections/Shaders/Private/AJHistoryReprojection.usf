@@ -27,7 +27,11 @@ Texture2D<float4> PreviousRadiance;
 Texture2D<uint> PreviousRadianceFlags;
 Texture2D<float4> PreviousSurface0;
 Texture2D<float4> PreviousSurface1;
+Texture2D<float4> PreviousAccumulatedRadiance;
+Texture2D<uint> PreviousAccumulatedHistoryLength;
 RWTexture2D<float4> ReprojectedRadiance;
+RWTexture2D<float4> ReprojectedAccumulatedRadiance;
+RWTexture2D<uint> ReprojectedAccumulatedHistoryLength;
 RWTexture2D<uint> ReprojectedHistoryFlags;
 RWTexture2D<float> HistoryAcceptance;
 RWTexture2D<uint> HistoryRejectionFlags;
@@ -58,6 +62,8 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     }
 
     ReprojectedRadiance[CurrentPixel] = 0.0f;
+    ReprojectedAccumulatedRadiance[CurrentPixel] = 0.0f;
+    ReprojectedAccumulatedHistoryLength[CurrentPixel] = 0u;
     ReprojectedHistoryFlags[CurrentPixel] = 0u;
     HistoryAcceptance[CurrentPixel] = 0.0f;
     HistoryRejectionFlags[CurrentPixel] = 0u;
@@ -97,6 +103,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     float BestAcceptedDepthError = 3.402823e+38f;
     float BestDiagnosticError = 3.402823e+38f;
     float4 BestAcceptedRadiance = 0.0f;
+    int2 BestAcceptedPixel = int2(0, 0);
     uint BestAcceptedFlags = 0u;
     float4 BestDiagnostic = 0.0f;
 
@@ -170,6 +177,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
                 bFoundAccepted = true;
                 BestAcceptedDepthError = DepthError;
                 BestAcceptedRadiance = Radiance;
+                BestAcceptedPixel = Candidate;
                 BestAcceptedFlags = PreviousFlags;
                 BestDiagnostic = Diagnostic;
             }
@@ -182,6 +190,13 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
         ReprojectedRadiance[CurrentPixel] = float4(
             BestAcceptedRadiance.rgb * HistoryExposureRatio,
             BestAcceptedRadiance.a); // Previous material hit T: unmodified world units.
+        // Read the EXACT texel chosen above by Week 5B. Never run a second
+        // independent history search for the reconstructed estimate.
+        const float4 PriorAccumulated = PreviousAccumulatedRadiance.Load(int3(BestAcceptedPixel, 0));
+        const uint PriorLength = PreviousAccumulatedHistoryLength.Load(int3(BestAcceptedPixel, 0));
+        ReprojectedAccumulatedRadiance[CurrentPixel] = float4(
+            PriorAccumulated.rgb * HistoryExposureRatio, 0.0f);
+        ReprojectedAccumulatedHistoryLength[CurrentPixel] = PriorLength;
         ReprojectedHistoryFlags[CurrentPixel] = BestAcceptedFlags;
         HistoryAcceptance[CurrentPixel] = 1.0f;
         HistoryRejectionFlags[CurrentPixel] = AJ_HIST_ACCEPTED;

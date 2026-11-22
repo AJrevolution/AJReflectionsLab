@@ -34,6 +34,8 @@ struct FAJReflectionHistory::FEntry
     TRefCountPtr<IPooledRenderTarget> Flags;
     TRefCountPtr<IPooledRenderTarget> Surface0;
     TRefCountPtr<IPooledRenderTarget> Surface1;
+    TRefCountPtr<IPooledRenderTarget> AccumulatedRadiance;
+    TRefCountPtr<IPooledRenderTarget> AccumulatedHistoryLength;
     float PreExposure = 1.0f;
     FIntRect ViewRect;
     uint32 LastUpdatedFrame = MAX_uint32;
@@ -46,6 +48,8 @@ struct FAJReflectionHistory::FEntry
         Flags.SafeRelease();
         Surface0.SafeRelease();
         Surface1.SafeRelease();
+        AccumulatedRadiance.SafeRelease();
+        AccumulatedHistoryLength.SafeRelease();
         PreExposure = 1.0f;
         LastUpdatedFrame = MAX_uint32;
         bSeeded = false;
@@ -159,6 +163,8 @@ FAJPreviousReflectionHistory FAJReflectionHistory::BeginViewHistory(
     }
     if (!Entry->Radiance.IsValid() || !Entry->Flags.IsValid()
         || !Entry->Surface0.IsValid() || !Entry->Surface1.IsValid()
+        || !Entry->AccumulatedRadiance.IsValid()
+        || !Entry->AccumulatedHistoryLength.IsValid()
         || !IsUsablePreExposure(Entry->PreExposure))
     {
         Entry->Clear();
@@ -180,6 +186,13 @@ FAJPreviousReflectionHistory FAJReflectionHistory::BeginViewHistory(
         PreviousSurface0Pooled, TEXT("AJReflections.History.Surface0"));
     Previous.Surface1 = GraphBuilder.RegisterExternalTexture(
         PreviousSurface1Pooled, TEXT("AJReflections.History.Surface1"));
+    // Reference-counted old resources remain owned by RDG through consumption.
+    const TRefCountPtr<IPooledRenderTarget> PreviousAccumulatedPooled = Entry->AccumulatedRadiance;
+    const TRefCountPtr<IPooledRenderTarget> PreviousLengthPooled = Entry->AccumulatedHistoryLength;
+    Previous.AccumulatedRadiance = GraphBuilder.RegisterExternalTexture(
+        PreviousAccumulatedPooled, TEXT("AJReflections.History.AccumulatedRadiance"));
+    Previous.AccumulatedHistoryLength = GraphBuilder.RegisterExternalTexture(
+        PreviousLengthPooled, TEXT("AJReflections.History.AccumulatedHistoryLength"));
     Previous.PreviousPreExposure = Entry->PreExposure;
     Previous.bValid = true;
     Previous.ResetReason = EAJReflectionHistoryResetReason::Valid;
@@ -207,7 +220,9 @@ void FAJReflectionHistory::CommitViewHistory(
     FRDGTextureRef CurrentReflectionRadiance,
     FRDGTextureRef CurrentReflectionRadianceFlags,
     FRDGTextureRef CurrentTemporalSurface0,
-    FRDGTextureRef CurrentTemporalSurface1)
+    FRDGTextureRef CurrentTemporalSurface1,
+    FRDGTextureRef CurrentAccumulatedRadiance,
+    FRDGTextureRef CurrentAccumulatedHistoryLength)
 {
     check(IsInRenderingThread());
     FAJReflectionHistoryKey Key;
@@ -221,6 +236,8 @@ void FAJReflectionHistory::CommitViewHistory(
         || !IsCurrentHistoryTexture(CurrentReflectionRadianceFlags, Extent, PF_R32_UINT)
         || !IsCurrentHistoryTexture(CurrentTemporalSurface0, Extent, PF_A32B32G32R32F)
         || !IsCurrentHistoryTexture(CurrentTemporalSurface1, Extent, PF_FloatRGBA)
+        || !IsCurrentHistoryTexture(CurrentAccumulatedRadiance, Extent, PF_A32B32G32R32F)
+        || !IsCurrentHistoryTexture(CurrentAccumulatedHistoryLength, Extent, PF_R32_UINT)
         || !IsUsablePreExposure(View.State->GetPreExposure()))
     {
         InvalidateViewHistory(View);
@@ -245,6 +262,8 @@ void FAJReflectionHistory::CommitViewHistory(
     GraphBuilder.QueueTextureExtraction(CurrentReflectionRadianceFlags, &Entry.Flags);
     GraphBuilder.QueueTextureExtraction(CurrentTemporalSurface0, &Entry.Surface0);
     GraphBuilder.QueueTextureExtraction(CurrentTemporalSurface1, &Entry.Surface1);
+    GraphBuilder.QueueTextureExtraction(CurrentAccumulatedRadiance, &Entry.AccumulatedRadiance);
+    GraphBuilder.QueueTextureExtraction(CurrentAccumulatedHistoryLength, &Entry.AccumulatedHistoryLength);
     Entry.PreExposure = View.State->GetPreExposure();
     Entry.ViewRect = ViewRect;
     Entry.LastUpdatedFrame = FrameNumber;

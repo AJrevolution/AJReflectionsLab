@@ -19,6 +19,7 @@ namespace
         TEXT("r.AJReflections.DebugMode"),
         1,
         TEXT("Selects the AJReflections debug visualization.\n")
+        TEXT("-1: no AJ diagnostic; normal lit SceneColor\n")
         TEXT("0: UV gradient\n")
         TEXT("1: Raw device depth\n")
         TEXT("2: Linear ViewZ\n")
@@ -53,7 +54,10 @@ namespace
         TEXT("31: Relative linear-depth consistency\n")
         TEXT("32: World-normal consistency\n")
         TEXT("33: Roughness / F0 consistency\n")
-        TEXT("34: Reprojected previous hit distance\n"),
+        TEXT("34: Reprojected previous hit distance\n")
+        TEXT("35: Accumulated reflection radiance (HDR)\n")
+        TEXT("36: Effective temporal history length (normalized display)\n")
+        TEXT("37: Temporal current sample weight\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(

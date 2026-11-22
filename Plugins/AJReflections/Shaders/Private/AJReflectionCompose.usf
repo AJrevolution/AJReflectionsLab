@@ -24,6 +24,13 @@ Texture2D<float> HistoryAcceptance;
 Texture2D<uint> HistoryRejectionFlags;
 Texture2D<float4> HistoryConsistency;
 #endif
+#if AJ_COMPOSE_HAS_ACCUMULATION
+Texture2D<float4> AccumulatedRadiance;
+Texture2D<uint> AccumulatedHistoryLength;
+Texture2D<float> TemporalCurrentWeight;
+#endif
+int PresentationMode;
+float TemporalMaxHistoryFrames;
 float HistoryExposureRatio;
 float DebugTraceDistanceMax;
 uint HistoryResetReason;
@@ -36,6 +43,24 @@ float4 MainPS(float4 SvPosition : SV_POSITION) : SV_Target0
 {
     float3 Color = 0.0f;
     const uint2 LocalPixel = uint2(int2(SvPosition.xy) - ViewRectMin);
+    if (DebugMode == -1)
+    {
+        // Hardware RGB-only blend adds this pre-exposed contribution to the
+        // existing opaque-stage SceneColor. No BRDF or exposure scaling here.
+#if AJ_COMPOSE_HAS_INPUTS
+        if (PresentationMode == 1)
+        {
+            Color = ReflectionRadiance.Load(int3(LocalPixel, 0)).rgb;
+        }
+#endif
+#if AJ_COMPOSE_HAS_ACCUMULATION
+        if (PresentationMode == 2)
+        {
+            Color = AccumulatedRadiance.Load(int3(LocalPixel, 0)).rgb;
+        }
+#endif
+        return float4(Color, 0.0f); // RGB-only blend keeps destination alpha.
+    }
 #if AJ_COMPOSE_HAS_INPUTS
     if (DebugMode >= 16 && DebugMode <= 19)
     {
@@ -191,6 +216,23 @@ float4 MainPS(float4 SvPosition : SV_POSITION) : SV_Target0
             const float V = saturate(Reprojected.a / max(DebugTraceDistanceMax, 1.0e-6f));
             Color = float3(V, V, V);
         }
+    }
+#endif
+#if AJ_COMPOSE_HAS_ACCUMULATION
+    if (DebugMode == 35)
+    {
+        Color = AccumulatedRadiance.Load(int3(LocalPixel, 0)).rgb;
+    }
+    else if (DebugMode == 36)
+    {
+        const uint Length = AccumulatedHistoryLength.Load(int3(LocalPixel, 0));
+        const float V = saturate(float(Length) / max(TemporalMaxHistoryFrames, 1.0f));
+        Color = float3(V, V, V); // Display only; stored count remains integer.
+    }
+    else if (DebugMode == 37)
+    {
+        const float V = saturate(TemporalCurrentWeight.Load(int3(LocalPixel, 0)));
+        Color = float3(V, V, V);
     }
 #endif
     return float4(Color, 1.0f);

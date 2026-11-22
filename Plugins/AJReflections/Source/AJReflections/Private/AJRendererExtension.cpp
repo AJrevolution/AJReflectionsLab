@@ -6,6 +6,7 @@
 #include "AJReflectionCompose.h"
 #include "AJTemporalInputs.h"
 #include "AJHistoryReprojection.h"
+#include "AJTemporalAccumulation.h"
 
 #include "RenderUtils.h"
 #include "RHI.h"
@@ -64,13 +65,23 @@ void FAJRendererExtension::RenderOpaqueReflections(
     // material backend, independent of DebugMode or previous-history validity.
     FAJTemporalInputs Temporal;
     FAJHistoryReprojectionOutputs Reprojected;
+    FAJTemporalAccumulationOutputs Accumulated;
     if (Outputs.HasRadiance())
     {
         Temporal = AddAJTemporalInputsPass(Context);
         if (Temporal.IsValid())
         {
-            // This never writes current ReflectionRadiance or mixes two frames.
+            // Week 5B selects the previous primary texel for BOTH raw and
+            // reconstructed history. Current one-sample radiance is untouched.
             Reprojected = AddAJHistoryReprojectionPass(Context, Outputs, Temporal, Previous);
+            // Must also run on first frame, and when history reuse is disabled.
+            Accumulated = AddAJTemporalAccumulationPass(Context, Outputs, Reprojected);
+            if (!Accumulated.IsValid())
+            {
+                History.InvalidateViewHistory(Context.View);
+                Previous = FAJPreviousReflectionHistory{};
+                Previous.ResetReason = EAJReflectionHistoryResetReason::MissingResource;
+            }
         }
         else
         {
@@ -81,19 +92,26 @@ void FAJRendererExtension::RenderOpaqueReflections(
     }
 
     const int32 DebugMode = GetAJDebugMode_AnyThread();
-    if (DebugMode >= 16 && DebugMode <= 34)
+    const int32 PresentationMode = GetAJReflectionPresentationMode_RenderThread();
+    // Legacy 0..15 diagnostics still own AfterDOF. In normal-scene -1 mode,
+    // presentation is an additive opaque-stage operation, never a debug overlay.
+    if ((DebugMode >= 16 && DebugMode <= 37)
+        || (DebugMode == -1 && PresentationMode != 0))
     {
-        AddAJReflectionComposePass(Context, Outputs, Previous, Reprojected, DebugMode);
+        AddAJReflectionComposePass(
+            Context, Outputs, Previous, Reprojected, Accumulated,
+            DebugMode, PresentationMode);
     }
 
-    // Old resources were registered before scheduling all four new extractions.
-    // Each destination is a field in a stable, separately allocated entry.
-    if (Outputs.HasRadiance() && Temporal.IsValid())
+    // All previous RDG inputs were registered before queuing six extractions.
+    // Each destination is a field in the stable heap-allocated history entry.
+    if (Outputs.HasRadiance() && Temporal.IsValid() && Accumulated.IsValid())
     {
         History.CommitViewHistory(
             Context.GraphBuilder, Context.View, Context.ViewRect,
             Outputs.ReflectionRadiance, Outputs.ReflectionRadianceFlags,
-            Temporal.Surface0, Temporal.Surface1);
+            Temporal.Surface0, Temporal.Surface1,
+            Accumulated.AccumulatedRadiance, Accumulated.AccumulatedHistoryLength);
     }
 }
 #endif

@@ -3,10 +3,13 @@
 #include "AJMaterialHitRayTracing.h"
 #include "AJReflectionHistory.h"
 #include "AJHistoryReprojection.h"
+#include "AJTemporalAccumulation.h"
 #include "AJReflectionTrace.h"
 #include "OpaqueReflectionExtension.h"
 
 #include "GlobalShader.h"
+#include "HAL/IConsoleManager.h"
+#include "RHIStaticStates.h"
 #include "PixelShaderUtils.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
@@ -14,6 +17,19 @@
 #include "SceneManagement.h"
 #include "ShaderParameterStruct.h"
 #include "ShaderPermutation.h"
+
+namespace
+{
+    TAutoConsoleVariable<int32> CVarAJReflectionPresentationMode(
+        TEXT("r.AJReflections.PresentationMode"), 0,
+        TEXT("0: no AJ scene addition (default). 1: add raw AJ radiance. 2: add accumulated AJ radiance. Use DebugMode -1."),
+        ECVF_RenderThreadSafe);
+}
+
+int32 GetAJReflectionPresentationMode_RenderThread()
+{
+    return FMath::Clamp(CVarAJReflectionPresentationMode.GetValueOnRenderThread(), 0, 2);
+}
 
 #if RHI_RAYTRACING
 namespace
@@ -26,11 +42,15 @@ namespace
         class FHaveInputs : SHADER_PERMUTATION_BOOL("AJ_COMPOSE_HAS_INPUTS");
         class FHaveHistory : SHADER_PERMUTATION_BOOL("AJ_COMPOSE_HAS_HISTORY");
         class FHaveReprojection : SHADER_PERMUTATION_BOOL("AJ_COMPOSE_HAS_REPROJECTION");
-        using FPermutationDomain = TShaderPermutationDomain<FHaveInputs, FHaveHistory, FHaveReprojection>;
+        class FHaveAccumulation : SHADER_PERMUTATION_BOOL("AJ_COMPOSE_HAS_ACCUMULATION");
+        using FPermutationDomain = TShaderPermutationDomain<
+            FHaveInputs, FHaveHistory, FHaveReprojection, FHaveAccumulation>;
 
         BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
             SHADER_PARAMETER(FIntPoint, ViewRectMin)
             SHADER_PARAMETER(int32, DebugMode)
+            SHADER_PARAMETER(int32, PresentationMode)
+            SHADER_PARAMETER(float, TemporalMaxHistoryFrames)
             SHADER_PARAMETER(float, HistoryExposureRatio)
             SHADER_PARAMETER(float, DebugTraceDistanceMax)
             SHADER_PARAMETER(uint32, HistoryResetReason)
@@ -41,6 +61,9 @@ namespace
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HistoryAcceptance)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, HistoryRejectionFlags)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HistoryConsistency)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D, AccumulatedRadiance)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, AccumulatedHistoryLength)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D, TemporalCurrentWeight)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, PreviousReflectionRadiance)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D<uint>, PreviousReflectionRadianceFlags)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, MaterialHitData0)
@@ -66,17 +89,34 @@ void AddAJReflectionComposePass(
     const FAJMaterialHitOutputs& Hit,
     const FAJPreviousReflectionHistory& Previous,
     const FAJHistoryReprojectionOutputs& Reprojected,
-    int32 DebugMode)
+    const FAJTemporalAccumulationOutputs& Accumulated,
+    int32 DebugMode,
+    int32 PresentationMode)
 {
 #if RHI_RAYTRACING
-    if (Context.SceneColor == nullptr || DebugMode < 16 || DebugMode > 34)
+    if (Context.SceneColor == nullptr)
     {
         return;
+    }
+    const bool bDiagnostic = DebugMode >= 16 && DebugMode <= 37;
+    const bool bPresent = DebugMode == -1 && (PresentationMode == 1 || PresentationMode == 2);
+    if (!bDiagnostic && !bPresent)
+    {
+        return;
+    }
+    const bool bHaveInputs = Hit.IsValid() && Hit.HasRadiance();
+    const bool bHaveAccumulation = Accumulated.IsValid();
+    if (bPresent && ((PresentationMode == 1 && !bHaveInputs)
+        || (PresentationMode == 2 && !bHaveAccumulation)))
+    {
+        return; // No source signal; never issue an additive pass with unbound input.
     }
 
     auto* Parameters = Context.GraphBuilder.AllocParameters<FAJReflectionComposePS::FParameters>();
     Parameters->ViewRectMin = Context.ViewRect.Min;
     Parameters->DebugMode = DebugMode;
+    Parameters->PresentationMode = bPresent ? PresentationMode : 0;
+    Parameters->TemporalMaxHistoryFrames = float(GetAJTemporalMaxHistoryFrames_RenderThread());
     Parameters->DebugTraceDistanceMax = FMath::Max(
         GetAJReflectionMaxTraceDistance_RenderThread(), 1.0f);
     Parameters->HistoryResetReason = static_cast<uint32>(Previous.ResetReason);
@@ -96,7 +136,10 @@ void AddAJReflectionComposePass(
     Parameters->HistoryAcceptance = bHaveReprojection ? Reprojected.HistoryAcceptance : nullptr;
     Parameters->HistoryRejectionFlags = bHaveReprojection ? Reprojected.HistoryRejectionFlags : nullptr;
     Parameters->HistoryConsistency = bHaveReprojection ? Reprojected.HistoryConsistency : nullptr;
-    const bool bHaveInputs = Hit.IsValid() && Hit.HasRadiance();
+    Parameters->AccumulatedRadiance = bHaveAccumulation ? Accumulated.AccumulatedRadiance : nullptr;
+    Parameters->AccumulatedHistoryLength = bHaveAccumulation ? Accumulated.AccumulatedHistoryLength : nullptr;
+    Parameters->TemporalCurrentWeight = bHaveAccumulation ? Accumulated.TemporalCurrentWeight : nullptr;
+    Parameters->MaterialHitData0 = bHaveInputs ? Hit.MaterialHitData0 : nullptr;
     Parameters->MaterialHitData0 = bHaveInputs ? Hit.MaterialHitData0 : nullptr;
     Parameters->MaterialHitData1 = bHaveInputs ? Hit.MaterialHitData1 : nullptr;
     Parameters->MaterialHitFlags = bHaveInputs ? Hit.MaterialHitFlags : nullptr;
@@ -110,21 +153,37 @@ void AddAJReflectionComposePass(
     Permutation.Set<FAJReflectionComposePS::FHaveInputs>(bHaveInputs);
     Permutation.Set<FAJReflectionComposePS::FHaveHistory>(bHaveHistory);
     Permutation.Set<FAJReflectionComposePS::FHaveReprojection>(bHaveReprojection);
-
+    Permutation.Set<FAJReflectionComposePS::FHaveAccumulation>(bHaveAccumulation);
     const TShaderMapRef<FAJReflectionComposePS> Shader(
         GetGlobalShaderMap(Context.View.GetShaderPlatform()), Permutation);
-    // A load-op draw directly into the opaque-stage working SceneColor target:
-    // future radiance can use the same composition API with pre-exposed HDR.
-    FPixelShaderUtils::AddFullscreenPass(
-        Context.GraphBuilder,
-        GetGlobalShaderMap(Context.View.GetShaderPlatform()),
-        RDG_EVENT_NAME("AJReflections.Compose"),
-        Shader, Parameters, Context.ViewRect);
+    // Debug overwrites the view; beauty performs source RGB + destination RGB,
+    // leaving SceneColor alpha alone. Never sample the render target as SRV.
+    FRHIBlendState* BlendState = bPresent
+        ? TStaticBlendState<CW_RGB, BO_Add, BF_One, BF_One>::GetRHI()
+        : TStaticBlendState<>::GetRHI();
+    if (bPresent)
+    {
+        FPixelShaderUtils::AddFullscreenPass(
+            Context.GraphBuilder,
+            GetGlobalShaderMap(Context.View.GetShaderPlatform()),
+            RDG_EVENT_NAME("AJReflections.Present"),
+            Shader, Parameters, Context.ViewRect, BlendState);
+    }
+    else
+    {
+        FPixelShaderUtils::AddFullscreenPass(
+            Context.GraphBuilder,
+            GetGlobalShaderMap(Context.View.GetShaderPlatform()),
+            RDG_EVENT_NAME("AJReflections.Compose"),
+            Shader, Parameters, Context.ViewRect, BlendState);
+    }
 #else
     (void)Context;
     (void)Hit;
     (void)Previous;
     (void)Reprojected;
+    (void)Accumulated;
     (void)DebugMode;
+    (void)PresentationMode;
 #endif
 }

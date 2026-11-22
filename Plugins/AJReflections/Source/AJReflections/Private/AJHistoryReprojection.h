@@ -16,11 +16,14 @@ struct FAJHistoryReprojectionOutputs
     FRDGTextureRef HistoryAcceptance = nullptr;        // R32_FLOAT; binary 0/1.
     FRDGTextureRef HistoryRejectionFlags = nullptr;    // R32_UINT; Week5B reasons.
     FRDGTextureRef HistoryConsistency = nullptr;       // RGBA32F; diagnostic metrics only.
+    FRDGTextureRef ReprojectedAccumulatedRadiance = nullptr;      // RGBA32F; A reserved 0.
+    FRDGTextureRef ReprojectedAccumulatedHistoryLength = nullptr; // R32_UINT.
 
     bool IsValid() const
     {
         return ReprojectedRadiance && ReprojectedHistoryFlags
-            && HistoryAcceptance && HistoryRejectionFlags && HistoryConsistency;
+            && HistoryAcceptance && HistoryRejectionFlags && HistoryConsistency
+            && ReprojectedAccumulatedRadiance && ReprojectedAccumulatedHistoryLength;
     }
 };
 

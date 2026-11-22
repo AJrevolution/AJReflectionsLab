@@ -1,0 +1,81 @@
+// Week 5C: bounded temporal accumulation only. No geometry rejection, clamping,
+// variance, neighborhood filtering, secondary distance weighting or spatial blur.
+#include "/Engine/Private/Common.ush"
+
+int2 OutputSize;
+uint MaxHistoryFrames;
+int AccumulationEnabled;
+Texture2D<float4> CurrentRadiance;
+Texture2D<uint> CurrentRadianceFlags;
+#if AJ_ACCUM_HAS_HISTORY
+Texture2D<float> HistoryAcceptance;
+Texture2D<float4> ReprojectedAccumulatedRadiance;
+Texture2D<uint> ReprojectedAccumulatedHistoryLength;
+#endif
+RWTexture2D<float4> AccumulatedRadiance;
+RWTexture2D<uint> AccumulatedHistoryLength;
+RWTexture2D<float> TemporalCurrentWeight;
+
+// Week 4B primary-valid and estimator-supported bits, with explicit complex
+// primary rejection. Secondary misses are valid ZERO-valued MC samples.
+bool AJHasSupportedCurrentSample(uint Flags)
+{
+    return (Flags & 3u) == 3u && (Flags & (1u << 7u)) == 0u;
+}
+
+[numthreads(8, 8, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint2 Pixel = DispatchThreadId.xy;
+    if (any(Pixel >= uint2(OutputSize)))
+    {
+        return;
+    }
+
+    // Always write all outputs, including unsupported primary/background pixels.
+    AccumulatedRadiance[Pixel] = 0.0f;
+    AccumulatedHistoryLength[Pixel] = 0u;
+    TemporalCurrentWeight[Pixel] = 0.0f;
+
+    const uint Flags = CurrentRadianceFlags.Load(int3(Pixel, 0));
+    const float4 Current = CurrentRadiance.Load(int3(Pixel, 0));
+    if (!AJHasSupportedCurrentSample(Flags) || !all(IsFinite(Current)))
+    {
+        return;
+    }
+
+    const uint Cap = max(MaxHistoryFrames, 1u);
+    uint NewLength = 1u;
+    float CurrentWeight = 1.0f;
+    float3 Result = Current.rgb;  // Still pre-exposed HDR. Alpha is reserved.
+
+#if AJ_ACCUM_HAS_HISTORY
+    if (AccumulationEnabled != 0 && Cap > 1u
+        && HistoryAcceptance.Load(int3(Pixel, 0)) > 0.5f)
+    {
+        const uint PreviousLength = ReprojectedAccumulatedHistoryLength.Load(int3(Pixel, 0));
+        const float4 Previous = ReprojectedAccumulatedRadiance.Load(int3(Pixel, 0));
+        if (PreviousLength > 0u && all(IsFinite(Previous)))
+        {
+            const uint BoundedPreviousLength = min(PreviousLength, Cap);
+            NewLength = min(BoundedPreviousLength + 1u, Cap);
+            CurrentWeight = rcp(float(NewLength));
+            Result = lerp(Previous.rgb, Current.rgb, CurrentWeight);
+
+            // Finite inputs can occasionally overflow in floating-point math.
+            // Reset to current rather than propagating NaN/Inf; never apply an
+            // otherwise-unjustified radiance ceiling or neighborhood clamp.
+            if (!all(IsFinite(Result)))
+            {
+                NewLength = 1u;
+                CurrentWeight = 1.0f;
+                Result = Current.rgb;
+            }
+        }
+    }
+#endif
+
+    AccumulatedRadiance[Pixel] = float4(Result, 0.0f);
+    AccumulatedHistoryLength[Pixel] = NewLength;
+    TemporalCurrentWeight[Pixel] = CurrentWeight;
+}

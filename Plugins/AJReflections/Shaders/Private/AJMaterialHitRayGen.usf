@@ -1,6 +1,6 @@
-// AJReflections Week 4A: native programmable material hit proof.
-// MaterialCHS/AHS and FMaterialClosestHitPayload are Unreal's, not AJ's.
-// PrimaryDirection is generated independently in compute using Week 3C sampler.
+// Programmable material ray generation with native hit shading and environment misses.
+// MaterialCHS/AHS and FMaterialClosestHitPayload are supplied by Unreal.
+// PrimaryDirection is produced by the primary stochastic sampling pass.
 #include "/Engine/Private/Common.ush"
 #define SUBSTRATE_SSS_MATERIAL_OVERRIDE 0
 #define SUBSTRATE_SSS_TRANSMISSION 0
@@ -8,6 +8,7 @@
 #include "/Engine/Private/DeferredShadingCommon.ush"
 #include "/Engine/Private/PositionReconstructionCommon.ush"
 #include "/Engine/Private/RayTracing/RayTracingCommon.ush"
+#include "/Engine/Private/ReflectionEnvironmentShared.ush"
 #include "/Engine/Private/Substrate/SubstrateEvaluation.ush"
 #include "/Engine/Shared/RayTracingTypes.h"
 #include "/Engine/Shared/LightDefinitions.h"
@@ -26,6 +27,7 @@ RWTexture2D<uint> MaterialHitFlags;
 RWTexture2D<float4> ReflectionRadiance;
 RWTexture2D<float4> SecondaryEmissive;
 RWTexture2D<float4> SecondaryDirect;
+RWTexture2D<float4> SecondaryEnvironment;
 RWTexture2D<uint> ReflectionRadianceFlags;
 
 // Flags: bit0 primary+sample valid, bit1 material hit, bit2 native material
@@ -37,7 +39,7 @@ RWTexture2D<uint> ReflectionRadianceFlags;
 #define AJ_HIT_ADAPTIVE 64u
 
 
-// Dedicated Week 4B radiance flags; do not change MaterialHitFlags.
+// Radiance validity and lighting-source flags are independent of MaterialHitFlags.
 #define AJ_RAD_PRIMARY_VALID          (1u << 0u)
 #define AJ_RAD_PRIMARY_SUPPORTED      (1u << 1u)
 #define AJ_RAD_SECONDARY_HIT          (1u << 2u)
@@ -46,7 +48,7 @@ RWTexture2D<uint> ReflectionRadianceFlags;
 #define AJ_RAD_DIRECT_EVALUATED       (1u << 5u)
 #define AJ_RAD_DIRECT_PARTIAL         (1u << 6u)
 #define AJ_RAD_PRIMARY_COMPLEX        (1u << 7u)
-// Bit 8 reserved for future source-correct environment misses (not 4B).
+#define AJ_RAD_ENVIRONMENT_MISS       (1u << 8u)
 
 #define AJ_SAMPLE_CLASS_COMPLEX_FALLBACK 4u
 
@@ -262,6 +264,7 @@ RAY_TRACING_ENTRY_RAYGEN(MainRGS)
     ReflectionRadiance[LocalPixel] = 0.0f;
     SecondaryEmissive[LocalPixel] = 0.0f;
     SecondaryDirect[LocalPixel] = 0.0f;
+    SecondaryEnvironment[LocalPixel] = 0.0f;
     ReflectionRadianceFlags[LocalPixel] = 0u;
 
     const float4 Sample = PrimaryDirection.Load(int3(LocalPixel, 0));
@@ -321,6 +324,23 @@ RAY_TRACING_ENTRY_RAYGEN(MainRGS)
         false /* secondary ray, not a camera ray */);
     if (!Hit.IsHit())
     {
+        // The primary BSDF already selected Ray.Direction. Evaluate incident
+        // skylight along that direction without a second roughness convolution.
+        if (bSupportedPrimary && (RadianceFlags & AJ_RAD_PRIMARY_COMPLEX) == 0u
+            && ReflectionStruct.SkyLightParameters.y > 0.0f)
+        {
+            float SkyAverageBrightness = 1.0f;
+            const float3 EnvironmentSceneRadiance = GetSkyLightReflection(Ray.Direction, 0.0f, SkyAverageBrightness);
+            const float3 EnvironmentPreExposed = EnvironmentSceneRadiance * View.PreExposure;
+            const float3 FinalMissReflection = Transport.xyz * EnvironmentPreExposed;
+            if (all(IsFinite(EnvironmentPreExposed)) && all(IsFinite(FinalMissReflection)))
+            {
+                SecondaryEnvironment[LocalPixel] = float4(EnvironmentPreExposed, 1.0f);
+                ReflectionRadiance[LocalPixel] = float4(FinalMissReflection, 0.0f);
+                RadianceFlags |= AJ_RAD_ENVIRONMENT_MISS;
+                ReflectionRadianceFlags[LocalPixel] = RadianceFlags;
+            }
+        }
         return;
     }
     Flags |= AJ_HIT_COMMITTED;
@@ -383,7 +403,7 @@ RAY_TRACING_ENTRY_RAYGEN(MainRGS)
     {
         RadianceFlags |= AJ_RAD_SECONDARY_PAYLOAD;
     }
-    // Preserve Week 4A material diagnostics for complex-primary geometric rays,
+    // Preserve material-hit diagnostics for complex-primary geometric rays,
     // but never call their mirror fallback a valid scattering estimator.
     if (bSupportedPrimary)
     {

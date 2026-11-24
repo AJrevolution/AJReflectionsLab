@@ -1,4 +1,4 @@
-// AJReflections Week 4A: opaque-stage material-hit diagnostics.
+// Opaque-stage reflection diagnostics and pre-exposed HDR presentation.
 // Pixel-shader render-target load preserves existing pre-exposed SceneColor
 // outside the diagnostic viewport; no scene color copy or post-process cache.
 #include "/Engine/Private/Common.ush"
@@ -13,6 +13,7 @@ Texture2D<float4> PrimaryTransport;
 Texture2D<float4> ReflectionRadiance;
 Texture2D<float4> SecondaryEmissive;
 Texture2D<float4> SecondaryDirect;
+Texture2D<float4> SecondaryEnvironment;
 #endif
 #if AJ_COMPOSE_HAS_HISTORY
 Texture2D<float4> PreviousReflectionRadiance;
@@ -64,7 +65,7 @@ float4 MainPS(float4 SvPosition : SV_POSITION) : SV_Target0
 #if AJ_COMPOSE_HAS_INPUTS
     if (DebugMode >= 16 && DebugMode <= 19)
     {
-        // Preserve the exact Week 4A secondary-material diagnostics.
+        // Preserve existing secondary-material diagnostics.
         const uint Flags = MaterialHitFlags.Load(int3(LocalPixel, 0));
         const bool bHit = (Flags & 2u) != 0u;
         const bool bValid = (Flags & 4u) != 0u;
@@ -130,7 +131,7 @@ float4 MainPS(float4 SvPosition : SV_POSITION) : SV_Target0
     else if (DebugMode == 26)
     {
         const uint Flags = PreviousReflectionRadianceFlags.Load(int3(LocalPixel, 0));
-        // Exactly Week 4B bits: 7 complex primary, 6 partial secondary,
+        // Radiance flags: 7 complex primary, 6 partial secondary,
         // 5 direct, 4 emissive, 2 hit, 1 primary-supported, 0 primary valid.
         if      ((Flags & (1u << 7u)) != 0u) Color = float3(1.0f, 0.0f, 0.0f);
         else if ((Flags & (1u << 6u)) != 0u) Color = float3(1.0f, 0.0f, 1.0f);
@@ -233,6 +234,13 @@ float4 MainPS(float4 SvPosition : SV_POSITION) : SV_Target0
     {
         const float V = saturate(TemporalCurrentWeight.Load(int3(LocalPixel, 0)));
         Color = float3(V, V, V);
+    }
+#endif
+#if AJ_COMPOSE_HAS_INPUTS
+    if (DebugMode == 38)
+    {
+        // The pre-exposed incident Skylight sample before primary transport.
+        Color = SecondaryEnvironment.Load(int3(LocalPixel, 0)).rgb;
     }
 #endif
     return float4(Color, 1.0f);

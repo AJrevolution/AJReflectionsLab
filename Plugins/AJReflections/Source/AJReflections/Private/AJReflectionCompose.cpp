@@ -73,6 +73,7 @@ namespace
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ReflectionRadiance)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SecondaryEmissive)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SecondaryDirect)
+            SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SecondaryEnvironment)
             RENDER_TARGET_BINDING_SLOTS()
         END_SHADER_PARAMETER_STRUCT()
     };
@@ -98,7 +99,7 @@ void AddAJReflectionComposePass(
     {
         return;
     }
-    const bool bDiagnostic = DebugMode >= 16 && DebugMode <= 37;
+    const bool bDiagnostic = DebugMode >= 16 && DebugMode <= 38;
     const bool bPresent = DebugMode == -1 && (PresentationMode == 1 || PresentationMode == 2);
     if (!bDiagnostic && !bPresent)
     {
@@ -147,8 +148,8 @@ void AddAJReflectionComposePass(
     Parameters->ReflectionRadiance = bHaveInputs ? Hit.ReflectionRadiance : nullptr;
     Parameters->SecondaryEmissive = bHaveInputs ? Hit.SecondaryEmissive : nullptr;
     Parameters->SecondaryDirect = bHaveInputs ? Hit.SecondaryDirect : nullptr;
-    Parameters->RenderTargets[0] = FRenderTargetBinding(
-        Context.SceneColor, ERenderTargetLoadAction::ELoad);
+    Parameters->SecondaryEnvironment = bHaveInputs ? Hit.SecondaryEnvironment : nullptr;
+    Parameters->RenderTargets[0] = FRenderTargetBinding(Context.SceneColor, ERenderTargetLoadAction::ELoad);
     FAJReflectionComposePS::FPermutationDomain Permutation;
     Permutation.Set<FAJReflectionComposePS::FHaveInputs>(bHaveInputs);
     Permutation.Set<FAJReflectionComposePS::FHaveHistory>(bHaveHistory);

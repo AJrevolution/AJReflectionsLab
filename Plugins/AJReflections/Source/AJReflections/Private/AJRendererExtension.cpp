@@ -71,8 +71,8 @@ void FAJRendererExtension::RenderOpaqueReflections(
         Temporal = AddAJTemporalInputsPass(Context);
         if (Temporal.IsValid())
         {
-            // Week 5B selects the previous primary texel for BOTH raw and
-            // reconstructed history. Current one-sample radiance is untouched.
+            // Reprojection selects the same previous primary texel for both raw
+            // and reconstructed history. Current one-sample radiance is untouched.
             Reprojected = AddAJHistoryReprojectionPass(Context, Outputs, Temporal, Previous);
             // Must also run on first frame, and when history reuse is disabled.
             Accumulated = AddAJTemporalAccumulationPass(Context, Outputs, Reprojected);
@@ -95,7 +95,7 @@ void FAJRendererExtension::RenderOpaqueReflections(
     const int32 PresentationMode = GetAJReflectionPresentationMode_RenderThread();
     // Legacy 0..15 diagnostics still own AfterDOF. In normal-scene -1 mode,
     // presentation is an additive opaque-stage operation, never a debug overlay.
-    if ((DebugMode >= 16 && DebugMode <= 37)
+    if ((DebugMode >= 16 && DebugMode <= 38)
         || (DebugMode == -1 && PresentationMode != 0))
     {
         AddAJReflectionComposePass(

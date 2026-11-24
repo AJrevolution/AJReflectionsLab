@@ -87,10 +87,10 @@ FAJReflectionsViewExtension::PostProcessAfterDOF_RenderThread(
             GraphBuilder);
     }
 
-    // Mode -1 is the untouched normal scene; modes 16..37 belong to the
-    // permanent opaque reflection stage rather than the AfterDOF diagnostic.
+    // Mode -1 is the untouched normal scene; high-numbered diagnostic modes
+    // belong to the permanent opaque stage, not the AfterDOF callback.
     const int32 DebugMode = GetAJDebugMode_AnyThread();
-    if (DebugMode == -1 || (DebugMode >= 16 && DebugMode <= 37))
+    if (DebugMode == -1 || (DebugMode >= 16 && DebugMode <= 38))
     {
         return Inputs.ReturnUntouchedSceneColorForPostProcessing(GraphBuilder);
     }

@@ -57,7 +57,8 @@ namespace
         TEXT("34: Reprojected previous hit distance\n")
         TEXT("35: Accumulated reflection radiance (HDR)\n")
         TEXT("36: Effective temporal history length (normalized display)\n")
-        TEXT("37: Temporal current sample weight\n"),
+        TEXT("37: Temporal current sample weight\n")
+        TEXT("38: Secondary Skylight/environment miss radiance (pre-exposed HDR)\n"),
         ECVF_RenderThreadSafe);
 
     TAutoConsoleVariable<float> CVarAJReflectionsDebugViewZMax(

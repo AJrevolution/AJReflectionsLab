@@ -2,6 +2,7 @@
 #include "AJMaterialHitRayTracing.h"
 #include "AJReflectionTrace.h"
 #include "OpaqueReflectionExtension.h"
+#include "ReflectionEnvironmentUniformParameters.h"
 
 #include "GlobalShader.h"
 #include "HAL/IConsoleManager.h"
@@ -84,6 +85,7 @@ namespace
             SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneUniformParameters, Scene)
             SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSubstrateGlobalUniformParameters, Substrate)
             SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FRayTracingLightGrid, LightGrid)
+            SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FReflectionUniformParameters, ReflectionStruct)
             SHADER_PARAMETER_RDG_BUFFER_SRV(RaytracingAccelerationStructure, TLAS)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, PrimaryDirection)
             SHADER_PARAMETER_RDG_TEXTURE(Texture2D, PrimarySurface)
@@ -95,6 +97,7 @@ namespace
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, ReflectionRadiance)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SecondaryEmissive)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SecondaryDirect)
+            SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SecondaryEnvironment)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, ReflectionRadianceFlags)
         END_SHADER_PARAMETER_STRUCT()
 
@@ -142,6 +145,7 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
         || !Context.MaterialDispatch.IsValid()
         || Context.TLAS == nullptr || Context.Substrate == nullptr
         || Context.Scene == nullptr || Context.LightGrid == nullptr
+        || Context.ReflectionEnvironment == nullptr
         || !Context.SceneTextures.SceneTextures
         || Extent.X <= 0 || Extent.Y <= 0)
     {
@@ -164,7 +168,7 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
     Outputs.PrimaryTransport = GraphBuilder.CreateTexture(
         FloatDesc, TEXT("AJReflections.PrimaryTransport"));
     // One graph-local classification channel to signal complex primary fallback
-    // without altering Week 4A's Direction/Surface output ABI.
+    // without altering the existing Direction/Surface output contract.
     FRDGTextureRef PrimarySamplingClass = GraphBuilder.CreateTexture(
         FlagsDesc, TEXT("AJReflections.PrimarySamplingClass"));
 
@@ -194,6 +198,7 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
     Outputs.ReflectionRadiance = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.ReflectionRadiance"));
     Outputs.SecondaryEmissive = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.SecondaryEmissive"));
     Outputs.SecondaryDirect = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.SecondaryDirect"));
+    Outputs.SecondaryEnvironment = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.SecondaryEnvironment"));
     Outputs.ReflectionRadianceFlags = GraphBuilder.CreateTexture(FlagsDesc, TEXT("AJReflections.ReflectionRadianceFlags"));
 
     auto* Parameters = GraphBuilder.AllocParameters<FAJMaterialHitRGS::FParameters>();
@@ -205,6 +210,7 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
     Parameters->Scene = Context.Scene;
     Parameters->Substrate = Context.Substrate;
     Parameters->LightGrid = Context.LightGrid;
+    Parameters->ReflectionStruct = Context.ReflectionEnvironment;
     Parameters->TLAS = Context.TLAS;
     Parameters->PrimaryDirection = PrimaryDirection;
     Parameters->PrimarySurface = PrimarySurface;
@@ -216,6 +222,7 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
     Parameters->ReflectionRadiance = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.ReflectionRadiance));
     Parameters->SecondaryEmissive = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.SecondaryEmissive));
     Parameters->SecondaryDirect = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.SecondaryDirect));
+    Parameters->SecondaryEnvironment = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.SecondaryEnvironment));
     Parameters->ReflectionRadianceFlags = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.ReflectionRadianceFlags));
 
     const TShaderMapRef<FAJMaterialHitRGS> RayGenShader(

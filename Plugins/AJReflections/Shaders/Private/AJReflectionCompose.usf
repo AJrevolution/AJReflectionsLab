@@ -14,6 +14,8 @@ Texture2D<float4> ReflectionRadiance;
 Texture2D<float4> SecondaryEmissive;
 Texture2D<float4> SecondaryDirect;
 Texture2D<float4> SecondaryEnvironment;
+Texture2D<float4> SecondarySkyLighting;
+Texture2D<uint> ReflectionRadianceFlags;
 #endif
 #if AJ_COMPOSE_HAS_HISTORY
 Texture2D<float4> PreviousReflectionRadiance;
@@ -241,6 +243,23 @@ float4 MainPS(float4 SvPosition : SV_POSITION) : SV_Target0
     {
         // The pre-exposed incident Skylight sample before primary transport.
         Color = SecondaryEnvironment.Load(int3(LocalPixel, 0)).rgb;
+    }
+    else if (DebugMode == 39)
+    {
+        // Geometry-hit environment radiance before primary transport.
+        Color = SecondarySkyLighting.Load(int3(LocalPixel, 0)).rgb;
+    }
+    else if (DebugMode == 40)
+    {
+        const uint Flags = ReflectionRadianceFlags.Load(int3(LocalPixel, 0));
+        // Green: evaluated (including valid black). Magenta: unsupported.
+        // Red: invalid. Black: unavailable, disabled, or geometry miss.
+        if ((Flags & (1u << 9u)) != 0u)
+            Color = float3(0.0f, 1.0f, 0.0f);
+        else if ((Flags & (1u << 11u)) != 0u)
+            Color = float3(1.0f, 0.0f, 0.0f);
+        else if ((Flags & (1u << 10u)) != 0u)
+            Color = float3(1.0f, 0.0f, 1.0f);
     }
 #endif
     return float4(Color, 1.0f);

@@ -29,6 +29,12 @@ namespace
         1,
         TEXT("0: disable AJ programmable material-hit dispatch. 1: enable (default)."),
         ECVF_RenderThreadSafe);
+
+    TAutoConsoleVariable<int32> CVarAJSecondarySkyLighting(
+        TEXT("r.AJReflections.SecondarySkyLighting"),
+        1,
+        TEXT("0: disable secondary geometry-hit Skylight evaluation; 1: enable diffuse/specular Skylight for supported secondary materials (default)."),
+        ECVF_RenderThreadSafe);
 }
 
 bool IsAJMaterialHitBackendEnabled_AnyThread()
@@ -80,6 +86,7 @@ namespace
             SHADER_PARAMETER(FIntPoint, OutputSize)
             SHADER_PARAMETER(FIntPoint, ViewRectMin)
             SHADER_PARAMETER(float, MaxTraceDistance)
+            SHADER_PARAMETER(int32, SecondarySkyLightingEnabled)
             SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
             SHADER_PARAMETER_STRUCT_INCLUDE(FSceneTextureShaderParameters, SceneTextures)
             SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneUniformParameters, Scene)
@@ -98,6 +105,7 @@ namespace
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SecondaryEmissive)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SecondaryDirect)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SecondaryEnvironment)
+            SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, SecondarySkyLighting)
             SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, ReflectionRadianceFlags)
         END_SHADER_PARAMETER_STRUCT()
 
@@ -199,12 +207,14 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
     Outputs.SecondaryEmissive = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.SecondaryEmissive"));
     Outputs.SecondaryDirect = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.SecondaryDirect"));
     Outputs.SecondaryEnvironment = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.SecondaryEnvironment"));
+    Outputs.SecondarySkyLighting = GraphBuilder.CreateTexture(FloatDesc, TEXT("AJReflections.SecondarySkyLighting"));
     Outputs.ReflectionRadianceFlags = GraphBuilder.CreateTexture(FlagsDesc, TEXT("AJReflections.ReflectionRadianceFlags"));
 
     auto* Parameters = GraphBuilder.AllocParameters<FAJMaterialHitRGS::FParameters>();
     Parameters->OutputSize = Extent;
     Parameters->ViewRectMin = Context.ViewRect.Min;
     Parameters->MaxTraceDistance = GetAJReflectionMaxTraceDistance_RenderThread();
+    Parameters->SecondarySkyLightingEnabled = CVarAJSecondarySkyLighting.GetValueOnRenderThread() != 0 ? 1 : 0;
     Parameters->View = Context.View.ViewUniformBuffer;
     Parameters->SceneTextures = Context.SceneTextures;
     Parameters->Scene = Context.Scene;
@@ -223,6 +233,7 @@ FAJMaterialHitOutputs AddAJMaterialHitPass(const FOpaqueReflectionRenderContext&
     Parameters->SecondaryEmissive = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.SecondaryEmissive));
     Parameters->SecondaryDirect = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.SecondaryDirect));
     Parameters->SecondaryEnvironment = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.SecondaryEnvironment));
+    Parameters->SecondarySkyLighting = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.SecondarySkyLighting));
     Parameters->ReflectionRadianceFlags = GraphBuilder.CreateUAV(FRDGTextureUAVDesc(Outputs.ReflectionRadianceFlags));
 
     const TShaderMapRef<FAJMaterialHitRGS> RayGenShader(

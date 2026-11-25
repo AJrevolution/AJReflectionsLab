@@ -16,6 +16,7 @@
 int2 OutputSize;
 int2 ViewRectMin;
 float MaxTraceDistance;
+int SecondarySkyLightingEnabled;
 RaytracingAccelerationStructure TLAS;
 Texture2D<float4> PrimaryDirection;
 Texture2D<float4> PrimarySurface;
@@ -28,6 +29,7 @@ RWTexture2D<float4> ReflectionRadiance;
 RWTexture2D<float4> SecondaryEmissive;
 RWTexture2D<float4> SecondaryDirect;
 RWTexture2D<float4> SecondaryEnvironment;
+RWTexture2D<float4> SecondarySkyLighting;
 RWTexture2D<uint> ReflectionRadianceFlags;
 
 // Flags: bit0 primary+sample valid, bit1 material hit, bit2 native material
@@ -49,6 +51,10 @@ RWTexture2D<uint> ReflectionRadianceFlags;
 #define AJ_RAD_DIRECT_PARTIAL         (1u << 6u)
 #define AJ_RAD_PRIMARY_COMPLEX        (1u << 7u)
 #define AJ_RAD_ENVIRONMENT_MISS       (1u << 8u)
+// Independent secondary-hit environment status; bits 0-8 retain their meaning.
+#define AJ_RAD_SECONDARY_SKY_EVALUATED (1u << 9u)
+#define AJ_RAD_SECONDARY_SKY_UNSUPPORTED (1u << 10u)
+#define AJ_RAD_SECONDARY_SKY_INVALID (1u << 11u)
 
 #define AJ_SAMPLE_CLASS_COMPLEX_FALLBACK 4u
 
@@ -250,6 +256,134 @@ FAJSecondaryDirectResult AJEvaluateSecondaryInfiniteLights(
     return Out;
 }
 
+// Secondary geometry-hit environment lighting is intentionally unoccluded.
+// The native material ray payload supplies all secondary BSDF information.
+#define AJ_SKY_NOT_EVALUATED 0u
+#define AJ_SKY_EVALUATED 1u
+#define AJ_SKY_UNSUPPORTED 2u
+#define AJ_SKY_INVALID 3u
+
+struct FAJSecondarySkyResult
+{
+    float3 Radiance; // Scene-referred exitant radiance; no pre-exposure yet.
+    uint Status;
+};
+
+FAJSecondarySkyResult AJEvaluateSecondarySkyLighting(
+    FMaterialClosestHitPayload Hit, FRayDesc Ray)
+{
+    FAJSecondarySkyResult Result = (FAJSecondarySkyResult) 0;
+    const bool bHasSky = ReflectionStruct.SkyLightParameters.y > 0.0f;
+    const bool bDiffuse = ShouldSkyLightAffectGlobalIllumination();
+    const bool bSpecular = ShouldSkyLightAffectReflection();
+    if (!bHasSky || (!bDiffuse && !bSpecular))
+    {
+        return Result; // No applicable Skylight; not a material failure.
+    }
+
+#if SUBSTRATE_GBUFFER_FORMAT == 1
+    const float3 V = -Ray.Direction;
+    if (!all(IsFinite(V)) || !all(IsFinite(Hit.WorldNormal))
+        || dot(V, V) < 0.25f)
+    {
+        Result.Status = AJ_SKY_INVALID;
+        return Result;
+    }
+
+    // Reuse the existing strict single-Slab support policy. V as the probe
+    // light direction is valid in the outgoing hemisphere; environment
+    // evaluation below reconstructs the native context with no explicit L.
+    FSubstrateBSDFContext SupportedContext;
+    if (!AJGetSupportedSecondaryBSDF(Hit, V, V, SupportedContext))
+    {
+        Result.Status = AJ_SKY_UNSUPPORTED;
+        return Result;
+    }
+#if !(SUBSTRATE_COMPLEXPATH && SUPPORTS_ANISOTROPIC_MATERIALS)
+    if (BSDF_GETHASANISOTROPY(SupportedContext.BSDF) != 0u)
+    {
+        Result.Status = AJ_SKY_UNSUPPORTED;
+        return Result;
+    }
+#endif
+
+    // The native environment overload reconstructs its tangent frame from
+    // the off-screen RT payload, rather than primary screen material data.
+    FSubstrateAddressing Addressing = GetSubstratePixelDataByteOffset(0, 0, 0);
+    const FSubstratePixelHeader Header = UnpackSubstrateHeaderIn(
+        Hit.SubstrateData, Addressing, Hit.SubstrateData);
+    const FSubstrateBSDFContext Context = SubstrateCreateBSDFContext(
+        Header, SupportedContext.BSDF, Addressing, V);
+    if (!all(IsFinite(Context.N)) || !all(IsFinite(Context.X))
+        || !all(IsFinite(Context.Y)) || dot(Context.N, V) <= 0.0f)
+    {
+        Result.Status = AJ_SKY_INVALID;
+        return Result;
+    }
+
+    // Match Unreal's native hardware hit-lighting environment integration:
+    // preserve the authored roughness and enable the rough diffuse model.
+    const FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings(
+        false /* force fully rough */, true /* rough diffuse */,
+        0 /* peeled layers */, false /* roughness tracking */);
+    const FSubstrateEnvLightResult Env = SubstrateEvaluateForEnvLight(
+        Context, bSpecular, Settings);
+    // Reject bad lobes BEFORE using them as SH/cubemap sampling inputs.
+    if ((bDiffuse && (!all(IsFinite(Env.DiffuseNormal))
+            || !all(IsFinite(Env.DiffuseWeight))
+            || dot(Env.DiffuseNormal, Env.DiffuseNormal) < 0.25f))
+        || (bSpecular && (!all(IsFinite(Env.SpecularDirection))
+            || !all(IsFinite(Env.SpecularWeight))
+            || !IsFinite(Env.SpecularSafeRoughness)
+            || dot(Env.SpecularDirection, Env.SpecularDirection) < 0.25f
+            || Env.SpecularSafeRoughness < 0.0f
+            || Env.SpecularSafeRoughness > 1.0f)))
+    {
+        Result.Status = AJ_SKY_INVALID;
+        return Result;
+    }
+
+    float3 DiffuseExitant = 0.0f;
+    if (bDiffuse)
+    {
+        // GetSkySHDiffuse already includes native cosine-convolved SH;
+        // there is no extra PI or NoL factor at this lookup.
+        const float3 DiffuseIncident = GetSkySHDiffuse(Env.DiffuseNormal)
+            * View.SkyLightColor.rgb;
+        DiffuseExitant = DiffuseIncident * Env.DiffuseWeight;
+    }
+
+    float3 SpecularExitant = 0.0f;
+    if (bSpecular)
+    {
+        float SkyAverageBrightness = 1.0f;
+        // This uses the SECONDARY lobe's native off-specular direction
+        // and safe roughness, rather than the first reflection ray's values.
+        const float3 SpecularIncident = GetSkyLightReflection(
+            Env.SpecularDirection, Env.SpecularSafeRoughness,
+            SkyAverageBrightness);
+        SpecularExitant = SpecularIncident * Env.SpecularWeight;
+    }
+
+    const float3 Throughput = LuminanceWeight(Context, Context.BSDF);
+    const float3 SceneRadiance = Throughput * (DiffuseExitant + SpecularExitant);
+    if (!all(IsFinite(Throughput)) || !all(IsFinite(DiffuseExitant))
+        || !all(IsFinite(SpecularExitant)) || !all(IsFinite(SceneRadiance)))
+    {
+        Result.Status = AJ_SKY_INVALID;
+        return Result;
+    }
+
+    Result.Radiance = SceneRadiance;
+    Result.Status = AJ_SKY_EVALUATED; // Includes legitimate black irradiance.
+#else
+    // Blendable retains its existing directional-light path; only native
+    // single-Slab Adaptive Substrate is supported for environment evaluation.
+    Result.Status = AJ_SKY_UNSUPPORTED;
+#endif
+    return Result;
+}
+
 RAY_TRACING_ENTRY_RAYGEN(MainRGS)
 {
     const uint2 LocalPixel = DispatchRaysIndex().xy;
@@ -265,6 +399,7 @@ RAY_TRACING_ENTRY_RAYGEN(MainRGS)
     SecondaryEmissive[LocalPixel] = 0.0f;
     SecondaryDirect[LocalPixel] = 0.0f;
     SecondaryEnvironment[LocalPixel] = 0.0f;
+    SecondarySkyLighting[LocalPixel] = 0.0f;
     ReflectionRadianceFlags[LocalPixel] = 0u;
 
     const float4 Sample = PrimaryDirection.Load(int3(LocalPixel, 0));
@@ -450,8 +585,48 @@ RAY_TRACING_ENTRY_RAYGEN(MainRGS)
             RadianceFlags |= AJ_RAD_DIRECT_PARTIAL;
         }
 
-        // Use register values, not UAV readback within the same invocation.
-        const float3 Final = Transport.xyz * (ValidEmissiveHDR + ValidDirectHDR);
+        float3 ValidSecondarySkyHDR = 0.0f;
+        if (SecondarySkyLightingEnabled != 0)
+        {
+            const FAJSecondarySkyResult Sky = AJEvaluateSecondarySkyLighting(Hit, Ray);
+            if (Sky.Status == AJ_SKY_EVALUATED)
+            {
+                const float3 SkyHDR = Sky.Radiance * View.PreExposure;
+                const float3 WeightedSkyHDR = Transport.xyz * SkyHDR;
+                if (all(IsFinite(SkyHDR)) && all(IsFinite(WeightedSkyHDR)))
+                {
+                    SecondarySkyLighting[LocalPixel] = float4(SkyHDR, 1.0f);
+                    ValidSecondarySkyHDR = SkyHDR;
+                    RadianceFlags|= AJ_RAD_SECONDARY_SKY_EVALUATED;
+                }
+                else
+                {
+                    RadianceFlags |= AJ_RAD_SECONDARY_SKY_INVALID;
+                }
+            }
+            else if (Sky.Status == AJ_SKY_UNSUPPORTED)
+            {
+                RadianceFlags |= AJ_RAD_SECONDARY_SKY_UNSUPPORTED;
+            }
+            else if (Sky.Status == AJ_SKY_INVALID)
+            {
+                RadianceFlags |= AJ_RAD_SECONDARY_SKY_INVALID;
+            }
+        }
+
+        // Consume each pre-exposed secondary term through the primary
+        // stochastic transport exactly once. Avoid UAV readback.
+        float3 Final = Transport.xyz * (ValidEmissiveHDR + ValidDirectHDR + ValidSecondarySkyHDR);
+        // An overflowing environment sum must not discard otherwise finite
+        // emissive or directional lighting; remove just the new contribution.
+        if (!all(IsFinite(Final))
+            && (RadianceFlags & AJ_RAD_SECONDARY_SKY_EVALUATED) != 0u)
+        {
+            SecondarySkyLighting[LocalPixel] = 0.0f;
+            RadianceFlags &= ~AJ_RAD_SECONDARY_SKY_EVALUATED;
+            RadianceFlags |= AJ_RAD_SECONDARY_SKY_INVALID;
+            Final = Transport.xyz * (ValidEmissiveHDR + ValidDirectHDR);
+        }
         // Finite HDR values above 1 are retained. No clamping or tonemapping.
         if (all(IsFinite(Final)))
         {

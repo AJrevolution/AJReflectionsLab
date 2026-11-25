@@ -95,7 +95,7 @@ void FAJRendererExtension::RenderOpaqueReflections(
     const int32 PresentationMode = GetAJReflectionPresentationMode_RenderThread();
     // Legacy 0..15 diagnostics still own AfterDOF. In normal-scene -1 mode,
     // presentation is an additive opaque-stage operation, never a debug overlay.
-    if ((DebugMode >= 16 && DebugMode <= 38)
+    if ((DebugMode >= 16 && DebugMode <= 40)
         || (DebugMode == -1 && PresentationMode != 0))
     {
         AddAJReflectionComposePass(

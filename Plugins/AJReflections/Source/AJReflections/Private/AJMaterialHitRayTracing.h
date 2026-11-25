@@ -21,12 +21,14 @@ struct FAJMaterialHitOutputs
     FRDGTextureRef SecondaryEmissive = nullptr;
     FRDGTextureRef SecondaryDirect = nullptr;
     FRDGTextureRef SecondaryEnvironment = nullptr;
+    FRDGTextureRef SecondarySkyLighting = nullptr; // Pre-transport scene lighting, pre-exposed HDR.
     FRDGTextureRef ReflectionRadianceFlags = nullptr;
 
     bool HasRadiance() const
     {
         return PrimaryTransport && ReflectionRadiance && SecondaryEmissive
-            && SecondaryDirect && SecondaryEnvironment && ReflectionRadianceFlags;
+            && SecondaryDirect && SecondaryEnvironment
+            && SecondarySkyLighting && ReflectionRadianceFlags;
     }
 
     bool IsValid() const

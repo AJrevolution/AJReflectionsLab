@@ -71,8 +71,9 @@ void FAJRendererExtension::RenderOpaqueReflections(
         Temporal = AddAJTemporalInputsPass(Context);
         if (Temporal.IsValid())
         {
-            // Reprojection selects the same previous primary texel for both raw
-            // and reconstructed history. Current one-sample radiance is untouched.
+            // Raw history uses nearest-compatible raster correspondence.
+            // Accumulated history uses jitter-neutral nominal pixel correspondence.
+            // Current one-sample radiance is untouched.
             Reprojected = AddAJHistoryReprojectionPass(Context, Outputs, Temporal, Previous);
             // Must also run on first frame, and when history reuse is disabled.
             Accumulated = AddAJTemporalAccumulationPass(Context, Outputs, Reprojected);

@@ -45,6 +45,7 @@ namespace
 
         BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
             SHADER_PARAMETER(FIntPoint, OutputSize)
+            SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
             SHADER_PARAMETER(float, HistoryExposureRatio)
             SHADER_PARAMETER(float, DepthThreshold)
             SHADER_PARAMETER(float, NormalThreshold)
@@ -136,6 +137,7 @@ FAJHistoryReprojectionOutputs AddAJHistoryReprojectionPass(
 
     auto* Parameters = GraphBuilder.AllocParameters<FAJHistoryReprojectionCS::FParameters>();
     Parameters->OutputSize = Extent;
+    Parameters->View = Context.View.ViewUniformBuffer;
     Parameters->HistoryExposureRatio = Context.View.State->GetPreExposure() / Previous.PreviousPreExposure;
     const FAJHistoryReprojectionThresholds Thresholds = GetAJHistoryReprojectionThresholds_RenderThread();
     Parameters->DepthThreshold = Thresholds.Depth;

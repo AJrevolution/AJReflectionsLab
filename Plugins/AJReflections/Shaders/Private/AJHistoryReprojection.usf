@@ -1,5 +1,7 @@
-// Week 5B: one reprojected prior sample plus binary per-pixel compatibility.
-// No accumulation, filtering, or hit-distance-based hard rejection.
+// Reproject raw history using nearest-compatible raster correspondence.
+// Transport accumulated history using independently validated,
+// jitter-neutral nominal pixel correspondence.
+// No radiance interpolation or spatial filtering.
 #include "/Engine/Private/Common.ush"
 
 #define AJ_HIST_ACCEPTED              (1u << 0u)
@@ -37,8 +39,8 @@ RWTexture2D<float> HistoryAcceptance;
 RWTexture2D<uint> HistoryRejectionFlags;
 RWTexture2D<float4> HistoryConsistency;
 
-// Week 4B: bit 0 primary sample valid; bit 1 supported estimator;
-// bit 7 explicitly complex-primary, therefore not reusable radiance.
+// Bit 0 marks a valid primary sample, bit 1 a supported estimator;
+// bit 7 marks a complex-primary fallback that must not reuse radiance.
 bool AJSupportedPrimary(uint Flags)
 {
     return (Flags & 3u) == 3u && (Flags & (1u << 7u)) == 0u;
@@ -100,15 +102,18 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     uint RejectedReasons = 0u;
     bool bFoundAccepted = false;
     bool bFoundDiagnostic = false;
+    float BestAcceptedDistanceSq = 3.402823e+38f;
     float BestAcceptedDepthError = 3.402823e+38f;
     float BestDiagnosticError = 3.402823e+38f;
     float4 BestAcceptedRadiance = 0.0f;
     int2 BestAcceptedPixel = int2(0, 0);
     uint BestAcceptedFlags = 0u;
+    float4 BestAcceptedDiagnostic = 0.0f;
     float4 BestDiagnostic = 0.0f;
 
-    // Check exactly the 2x2 nearest previous sample footprint. Point-load the
-    // BEST ACCEPTED texel; do not bilinear-filter across depth/material edges.
+    // Search the previous raw 2x2 footprint. Rank compatible texel
+    // centres by squared pixel distance, then by depth and row-major order.
+    // Raw radiance, flags and diagnostics use the same winning texel.
     [unroll]
     for (int Y = 0; Y < 2; ++Y)
     {
@@ -121,6 +126,17 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
                 RejectedReasons |= AJ_HIST_OUTSIDE;
                 continue;
             }
+
+            const float2 CandidateCenter = float2(Candidate) + 0.5f;
+            const float2 Delta = CandidateCenter - PrevCenter;
+            // A sample exactly one pixel away on either axis has zero
+            // separable footprint support. Strict inequality preserves
+            // genuine arbitrarily small nonzero subpixel overlap.
+            if (any(abs(Delta) >= 1.0f))
+            {
+                continue;
+            }
+            const float DistanceSq = dot(Delta, Delta);
 
             const uint PreviousFlags = PreviousRadianceFlags.Load(int3(Candidate, 0));
             const float4 PreviousS0 = PreviousSurface0.Load(int3(Candidate, 0));
@@ -172,31 +188,122 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
                 RejectedReasons |= AJ_HIST_PREVIOUS_INVALID;
                 continue;
             }
-            if (!bFoundAccepted || DepthError < BestAcceptedDepthError)
+            
+            // Compatibility has already passed. Depth is a tie-breaker, not
+            // a substitute for correspondence with the predicted pixel centre.
+            // Exact float ties use a fixed row-major coordinate order; no
+            // epsilon can allow a meaningfully farther candidate to win.
+            const bool bCloser = DistanceSq < BestAcceptedDistanceSq;
+            const bool bEqualDistance = DistanceSq == BestAcceptedDistanceSq;
+            const bool bBetterDepth = DepthError < BestAcceptedDepthError;
+            const bool bEqualDepth = DepthError == BestAcceptedDepthError;
+            const bool bEarlierRowMajor = Candidate.y < BestAcceptedPixel.y
+                || (Candidate.y == BestAcceptedPixel.y && Candidate.x < BestAcceptedPixel.x);
+            if (!bFoundAccepted || bCloser
+                || (bEqualDistance && (bBetterDepth || (bEqualDepth && bEarlierRowMajor))))
             {
                 bFoundAccepted = true;
+                BestAcceptedDistanceSq = DistanceSq;
                 BestAcceptedDepthError = DepthError;
                 BestAcceptedRadiance = Radiance;
                 BestAcceptedPixel = Candidate;
                 BestAcceptedFlags = PreviousFlags;
-                BestDiagnostic = Diagnostic;
+                BestAcceptedDiagnostic = Diagnostic;
             }
         }
     }
 
-    HistoryConsistency[CurrentPixel] = bFoundDiagnostic ? BestDiagnostic : 0.0f;
+    HistoryConsistency[CurrentPixel] = bFoundAccepted
+        ? BestAcceptedDiagnostic
+        : (bFoundDiagnostic ? BestDiagnostic : 0.0f);
     if (bFoundAccepted)
     {
         ReprojectedRadiance[CurrentPixel] = float4(
             BestAcceptedRadiance.rgb * HistoryExposureRatio,
             BestAcceptedRadiance.a); // Previous material hit T: unmodified world units.
-        // Read the EXACT texel chosen above by Week 5B. Never run a second
-        // independent history search for the reconstructed estimate.
-        const float4 PriorAccumulated = PreviousAccumulatedRadiance.Load(int3(BestAcceptedPixel, 0));
-        const uint PriorLength = PreviousAccumulatedHistoryLength.Load(int3(BestAcceptedPixel, 0));
-        ReprojectedAccumulatedRadiance[CurrentPixel] = float4(
-            PriorAccumulated.rgb * HistoryExposureRatio, 0.0f);
-        ReprojectedAccumulatedHistoryLength[CurrentPixel] = PriorLength;
+        // Raw history uses the nearest compatible raster texel.
+        // Accumulated history uses independently validated,
+        // jitter-neutral nominal pixel correspondence.
+
+        // Remove raster jitter displacement from accumulated-history transport.
+        // Real camera and primitive motion remain in Motion.xy.
+        const float2 JitterDeltaPixels =
+            (View.TemporalAAJitter.zw - View.TemporalAAJitter.xy)
+            * float2(
+                 0.5f * float(OutputSize.x),
+                -0.5f * float(OutputSize.y));
+
+        const float2 AccumPrevCenter = PrevCenter - JitterDeltaPixels;
+
+        // Accumulated history represents samples assigned to a nominal pixel
+        // footprint rather than an exact jittered raster sample.
+        if (all(IsFinite(AccumPrevCenter))
+            && all(AccumPrevCenter >= 0.0f)
+            && all(AccumPrevCenter < float2(OutputSize)))
+        {
+            const int2 AccumPixel = int2(floor(AccumPrevCenter));
+
+            const uint AccumFlags =
+                PreviousRadianceFlags.Load(int3(AccumPixel, 0));
+
+            const float4 AccumS0 =
+                PreviousSurface0.Load(int3(AccumPixel, 0));
+
+            const float4 AccumS1 =
+                PreviousSurface1.Load(int3(AccumPixel, 0));
+
+            if (AJSupportedPrimary(AccumFlags)
+                && AJValidSurface(AccumS0, AccumS1))
+            {
+                const float DepthError =
+                    abs(AccumS0.w - ExpectedPrevViewZ)
+                    / max(abs(ExpectedPrevViewZ), 100.0f);
+
+                const float NormalDot =
+                    dot(normalize(CurrentS0.xyz), normalize(AccumS0.xyz));
+
+                const float RoughnessError =
+                    abs(CurrentS1.w - AccumS1.w);
+
+                const float3 F0Difference =
+                    abs(CurrentS1.xyz - AccumS1.xyz);
+
+                const float F0Error =
+                    max(F0Difference.x,
+                        max(F0Difference.y, F0Difference.z));
+
+                if (IsFinite(DepthError)
+                    && IsFinite(NormalDot)
+                    && IsFinite(RoughnessError)
+                    && IsFinite(F0Error)
+                    && DepthError <= DepthThreshold
+                    && NormalDot >= NormalThreshold
+                    && RoughnessError <= RoughnessThreshold
+                    && F0Error <= F0Threshold)
+                {
+                    const float4 PriorAccumulated =
+                        PreviousAccumulatedRadiance.Load(
+                            int3(AccumPixel, 0));
+
+                    const uint PriorLength =
+                        PreviousAccumulatedHistoryLength.Load(
+                            int3(AccumPixel, 0));
+
+                    if (PriorLength > 0u
+                        && all(IsFinite(PriorAccumulated)))
+                    {
+                        ReprojectedAccumulatedRadiance[CurrentPixel] =
+                            float4(
+                                PriorAccumulated.rgb * HistoryExposureRatio,
+                                0.0f);
+
+                        ReprojectedAccumulatedHistoryLength[CurrentPixel] =
+                            PriorLength;
+                    }
+                }
+            }
+        }
+
         ReprojectedHistoryFlags[CurrentPixel] = BestAcceptedFlags;
         HistoryAcceptance[CurrentPixel] = 1.0f;
         HistoryRejectionFlags[CurrentPixel] = AJ_HIST_ACCEPTED;
